@@ -1,0 +1,164 @@
+# Calculate return on investment for original content productions and identify successful production patterns.
+
+WITH production_costs AS (
+    -- Hypothetical production costs table
+    SELECT 
+        pc.content_id,
+        pc.production_budget,
+        pc.marketing_budget,
+        pc.production_country,
+        pc.production_year,
+        pc.content_category, -- 'Original', 'Licensed', 'Co-production'
+        pc.genre_focus
+    FROM production_costs pc
+    WHERE pc.production_year >= YEAR(CURRENT_DATE) - 5
+),
+content_performance AS (
+    SELECT 
+        pc.content_id,
+        c.title,
+        c.genre,
+        c.content_type,
+        c.imdb_rating,
+        -- Viewership metrics
+        COUNT(DISTINCT vh.profile_id) as total_viewers,
+        COUNT(vh.view_id) as total_views,
+        AVG(vh.completion_percentage) as avg_completion,
+        -- Engagement duration
+        SUM(TIMESTAMPDIFF(MINUTE, vh.start_time, vh.end_time)) as total_watch_minutes,
+        -- Subscription impact (users who joined around content release)
+        (SELECT COUNT(DISTINCT u.user_id)
+         FROM users u
+         WHERE u.signup_date BETWEEN c.added_date AND DATE_ADD(c.added_date, INTERVAL 30 DAY)
+         AND EXISTS (
+             SELECT 1 FROM viewing_history vh2
+             JOIN user_profiles up ON vh2.profile_id = up.profile_id
+             WHERE up.user_id = u.user_id
+             AND vh2.content_id = pc.content_id
+             AND vh2.start_time BETWEEN u.signup_date AND DATE_ADD(u.signup_date, INTERVAL 7 DAY)
+         )
+        ) as attributed_subscriptions
+    FROM production_costs pc
+    JOIN content c ON pc.content_id = c.content_id
+    LEFT JOIN viewing_history vh ON pc.content_id = vh.content_id
+    GROUP BY pc.content_id, c.title, c.genre, c.content_type, c.imdb_rating
+),
+financial_metrics AS (
+    SELECT 
+        cp.content_id,
+        cp.title,
+        cp.genre,
+        cp.content_type,
+        pc.production_budget,
+        pc.marketing_budget,
+        pc.production_country,
+        pc.content_category,
+        -- Revenue calculations
+        (cp.attributed_subscriptions * 
+         (SELECT AVG(monthly_value) FROM subscription_value WHERE subscription_type = 'premium') * 12
+        ) as estimated_annual_revenue,
+        -- Engagement value (based on watch time)
+        (cp.total_watch_minutes * 0.01) as engagement_revenue, -- $0.01 per minute watched
+        -- Cost calculations
+        (pc.production_budget + pc.marketing_budget) as total_cost,
+        -- Performance metrics
+        cp.total_viewers,
+        cp.avg_completion,
+        cp.imdb_rating
+    FROM content_performance cp
+    JOIN production_costs pc ON cp.content_id = pc.content_id
+),
+roi_analysis AS (
+    SELECT 
+        *,
+        -- ROI calculations
+        (estimated_annual_revenue + engagement_revenue - total_cost) as net_profit,
+        ((estimated_annual_revenue + engagement_revenue - total_cost) / total_cost * 100) as roi_percentage,
+        -- Break-even analysis
+        CASE 
+            WHEN (estimated_annual_revenue + engagement_revenue) >= total_cost THEN 
+                DATEDIFF(
+                    (SELECT MIN(vh.start_time) 
+                     FROM viewing_history vh 
+                     WHERE vh.content_id = fm.content_id
+                     AND (estimated_annual_revenue + engagement_revenue) >= total_cost
+                    ),
+                    (SELECT MIN(vh.start_time) FROM viewing_history vh WHERE vh.content_id = fm.content_id)
+                )
+            ELSE NULL
+        END as days_to_break_even,
+        -- Success classification
+        CASE 
+            WHEN roi_percentage > 100 THEN 'High Success'
+            WHEN roi_percentage > 50 THEN 'Moderate Success'
+            WHEN roi_percentage > 0 THEN 'Break Even'
+            ELSE 'Underperforming'
+        END as success_category
+    FROM financial_metrics fm
+    WHERE total_cost > 0
+),
+production_patterns AS (
+    SELECT 
+        ra.genre,
+        ra.content_type,
+        ra.content_category,
+        ra.production_country,
+        -- Aggregate performance
+        COUNT(*) as productions_count,
+        AVG(ra.roi_percentage) as avg_roi,
+        AVG(ra.days_to_break_even) as avg_break_even_days,
+        AVG(ra.imdb_rating) as avg_imdb_rating,
+        AVG(ra.avg_completion) as avg_completion_rate,
+        -- Success rate
+        SUM(CASE WHEN ra.success_category = 'High Success' THEN 1 ELSE 0 END) * 100.0 / COUNT(*) as high_success_rate,
+        -- Risk assessment
+        STDDEV(ra.roi_percentage) as roi_volatility,
+        -- Budget efficiency
+        AVG(ra.total_viewers / ra.total_cost * 1000) as viewers_per_thousand_dollars
+    FROM roi_analysis ra
+    GROUP BY ra.genre, ra.content_type, ra.content_category, ra.production_country
+    HAVING COUNT(*) >= 5
+)
+SELECT 
+    pp.genre,
+    pp.content_type,
+    pp.content_category,
+    pp.production_country,
+    pp.productions_count,
+    pp.avg_roi,
+    pp.avg_break_even_days,
+    pp.high_success_rate,
+    pp.roi_volatility,
+    pp.viewers_per_thousand_dollars,
+    -- Investment recommendation
+    CASE 
+        WHEN pp.avg_roi > 100 AND pp.roi_volatility < 50 THEN 'Increase Investment'
+        WHEN pp.avg_roi > 50 AND pp.high_success_rate > 30 THEN 'Maintain Investment'
+        WHEN pp.avg_roi < 0 AND pp.high_success_rate < 10 THEN 'Reduce Investment'
+        ELSE 'Further Analysis Required'
+    END as investment_recommendation,
+    -- Optimal production characteristics
+    (SELECT CONCAT('Budget: $', ROUND(AVG(production_budget)/1000000,1), 'M, ',
+                  'Duration: ', ROUND(AVG(duration_minutes)), 'min, ',
+                  'Rating: ', ROUND(AVG(imdb_rating),1))
+     FROM content c
+     JOIN roi_analysis ra ON c.content_id = ra.content_id
+     WHERE c.genre = pp.genre
+     AND c.content_type = pp.content_type
+     AND ra.success_category = 'High Success'
+     GROUP BY c.genre, c.content_type
+     LIMIT 1
+    ) as successful_production_profile,
+    -- Talent recommendations
+    (SELECT GROUP_CONCAT(DISTINCT a.actor_name ORDER BY COUNT(DISTINCT ca.content_id) DESC LIMIT 3)
+     FROM content_actors ca
+     JOIN actors a ON ca.actor_id = a.actor_id
+     JOIN roi_analysis ra ON ca.content_id = ra.content_id
+     WHERE ra.genre = pp.genre
+     AND ra.content_type = pp.content_type
+     AND ra.success_category = 'High Success'
+     GROUP BY a.actor_name
+     HAVING COUNT(DISTINCT ca.content_id) >= 2
+    ) as successful_actors
+FROM production_patterns pp
+ORDER BY pp.avg_roi DESC;

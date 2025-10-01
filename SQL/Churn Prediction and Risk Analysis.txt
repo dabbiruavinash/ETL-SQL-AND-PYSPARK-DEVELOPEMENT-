@@ -1,0 +1,96 @@
+# Identify users at high risk of churning based on complex behavioral patterns and engagement metrics.
+
+WITH user_engagement_metrics AS (
+    SELECT 
+        u.user_id,
+        u.subscription_type,
+        u.country,
+        u.signup_date,
+        -- Recent activity metrics (last 30 days)
+        (SELECT COUNT(*) 
+         FROM viewing_history vh 
+         JOIN user_profiles up ON vh.profile_id = up.profile_id 
+         WHERE up.user_id = u.user_id 
+         AND vh.start_time >= DATE_SUB(CURRENT_DATE, INTERVAL 30 DAY)
+        ) as recent_views,
+        -- Historical activity metrics (31-90 days ago)
+        (SELECT COUNT(*) 
+         FROM viewing_history vh 
+         JOIN user_profiles up ON vh.profile_id = up.profile_id 
+         WHERE up.user_id = u.user_id 
+         AND vh.start_time BETWEEN DATE_SUB(CURRENT_DATE, INTERVAL 90 DAY) 
+                             AND DATE_SUB(CURRENT_DATE, INTERVAL 31 DAY)
+        ) as historical_views,
+        -- Activity trend
+        (SELECT COUNT(DISTINCT DATE(vh.start_time))
+         FROM viewing_history vh 
+         JOIN user_profiles up ON vh.profile_id = up.profile_id 
+         WHERE up.user_id = u.user_id 
+         AND vh.start_time >= DATE_SUB(CURRENT_DATE, INTERVAL 30 DAY)
+        ) as active_days_recent,
+        -- Content variety
+        (SELECT COUNT(DISTINCT vh.content_id)
+         FROM viewing_history vh 
+         JOIN user_profiles up ON vh.profile_id = up.profile_id 
+         WHERE up.user_id = u.user_id 
+         AND vh.start_time >= DATE_SUB(CURRENT_DATE, INTERVAL 60 DAY)
+        ) as unique_content_60d,
+        -- Completion behavior
+        (SELECT AVG(vh.completion_percentage)
+         FROM viewing_history vh 
+         JOIN user_profiles up ON vh.profile_id = up.profile_id 
+         WHERE up.user_id = u.user_id 
+         AND vh.start_time >= DATE_SUB(CURRENT_DATE, INTERVAL 60 DAY)
+        ) as avg_completion_rate,
+        -- Device usage
+        (SELECT COUNT(DISTINCT vh.device_type)
+         FROM viewing_history vh 
+         JOIN user_profiles up ON vh.profile_id = up.profile_id 
+         WHERE up.user_id = u.user_id 
+         AND vh.start_time >= DATE_SUB(CURRENT_DATE, INTERVAL 60 DAY)
+        ) as unique_devices
+    FROM users u
+    WHERE u.signup_date <= DATE_SUB(CURRENT_DATE, INTERVAL 60 DAY)
+),
+churn_risk_calculation AS (
+    SELECT 
+        uem.*,
+        -- Activity decline ratio
+        CASE 
+            WHEN uem.historical_views > 0 THEN 
+                (uem.historical_views - uem.recent_views) / uem.historical_views 
+            ELSE 0 
+        END as activity_decline_ratio,
+        -- Churn risk score (complex calculation)
+        (CASE WHEN uem.recent_views = 0 THEN 0.4 ELSE 0 END) +
+        (CASE WHEN uem.activity_decline_ratio > 0.7 THEN 0.3 ELSE 0 END) +
+        (CASE WHEN uem.avg_completion_rate < 50 THEN 0.2 ELSE 0 END) +
+        (CASE WHEN uem.unique_devices = 1 THEN 0.1 ELSE 0 END) as churn_risk_score,
+        -- User segment
+        CASE 
+            WHEN uem.recent_views = 0 THEN 'Inactive'
+            WHEN uem.activity_decline_ratio > 0.5 THEN 'Declining'
+            WHEN uem.unique_content_60d < 5 THEN 'Limited Content'
+            ELSE 'Active'
+        END as engagement_segment
+    FROM user_engagement_metrics uem
+)
+SELECT 
+    subscription_type,
+    country,
+    engagement_segment,
+    -- Risk distribution
+    COUNT(*) as user_count,
+    AVG(churn_risk_score) as avg_risk_score,
+    SUM(CASE WHEN churn_risk_score > 0.7 THEN 1 ELSE 0 END) as high_risk_users,
+    SUM(CASE WHEN churn_risk_score BETWEEN 0.4 AND 0.7 THEN 1 ELSE 0 END) as medium_risk_users,
+    SUM(CASE WHEN churn_risk_score < 0.4 THEN 1 ELSE 0 END) as low_risk_users,
+    -- Behavioral insights
+    AVG(recent_views) as avg_recent_views,
+    AVG(historical_views) as avg_historical_views,
+    AVG(avg_completion_rate) as avg_completion,
+    AVG(unique_content_60d) as avg_unique_content
+FROM churn_risk_calculation
+GROUP BY subscription_type, country, engagement_segment
+HAVING COUNT(*) >= 10
+ORDER BY subscription_type, country, avg_risk_score DESC;

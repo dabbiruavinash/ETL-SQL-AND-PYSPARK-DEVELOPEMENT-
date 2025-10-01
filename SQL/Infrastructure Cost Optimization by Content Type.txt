@@ -1,0 +1,167 @@
+# Analyze infrastructure costs by content type and optimize CDN, storage, and streaming costs.
+
+WITH streaming_metrics AS (
+    SELECT 
+        c.content_id,
+        c.content_type,
+        c.genre,
+        c.duration_minutes,
+        c.quality_tier, -- 'SD', 'HD', '4K'
+        -- Streaming metrics
+        COUNT(vh.view_id) as total_streams,
+        SUM(TIMESTAMPDIFF(SECOND, vh.start_time, vh.end_time)) as total_stream_seconds,
+        AVG(TIMESTAMPDIFF(SECOND, vh.start_time, vh.end_time)) as avg_stream_duration,
+        -- Quality distribution
+        COUNT(CASE WHEN vh.quality = '4K' THEN 1 END) as uhd_streams,
+        COUNT(CASE WHEN vh.quality = 'HD' THEN 1 END) as hd_streams,
+        COUNT(CASE WHEN vh.quality = 'SD' THEN 1 END) as sd_streams,
+        -- Geographic distribution
+        COUNT(DISTINCT u.country) as countries_streamed,
+        -- Device distribution
+        COUNT(DISTINCT vh.device_type) as device_types
+    FROM viewing_history vh
+    JOIN content c ON vh.content_id = c.content_id
+    JOIN user_profiles up ON vh.profile_id = up.profile_id
+    JOIN users u ON up.user_id = u.user_id
+    WHERE vh.start_time >= DATE_SUB(CURRENT_DATE, INTERVAL 90 DAY)
+    GROUP BY c.content_id, c.content_type, c.genre, c.duration_minutes, c.quality_tier
+),
+infrastructure_costs AS (
+    -- Hypothetical infrastructure costs table
+    SELECT 
+        ic.content_id,
+        ic.storage_cost_monthly,
+        ic.cdn_cost_monthly,
+        ic.transcoding_cost_monthly,
+        ic.total_cost_monthly,
+        ic.cost_per_gb_streamed
+    FROM infrastructure_costs ic
+    WHERE ic.month = DATE_FORMAT(CURRENT_DATE, '%Y-%m-01')
+),
+content_cost_analysis AS (
+    SELECT 
+        sm.content_id,
+        sm.content_type,
+        sm.genre,
+        sm.duration_minutes,
+        sm.quality_tier,
+        sm.total_streams,
+        sm.total_stream_seconds,
+        -- Cost calculations
+        ic.storage_cost_monthly,
+        ic.cdn_cost_monthly,
+        ic.transcoding_cost_monthly,
+        ic.total_cost_monthly,
+        -- Efficiency metrics
+        sm.total_streams / GREATEST(ic.total_cost_monthly, 1) as streams_per_dollar,
+        sm.total_stream_seconds / GREATEST(ic.total_cost_monthly, 1) as seconds_per_dollar,
+        -- Cost per stream
+        ic.total_cost_monthly / GREATEST(sm.total_streams, 1) as cost_per_stream,
+        -- Quality cost analysis
+        CASE 
+            WHEN sm.uhd_streams > 0 THEN ic.cdn_cost_monthly * (sm.uhd_streams * 1.5 + sm.hd_streams * 1.0 + sm.sd_streams * 0.5) / sm.total_streams
+            WHEN sm.hd_streams > 0 THEN ic.cdn_cost_monthly * (sm.hd_streams * 1.0 + sm.sd_streams * 0.5) / sm.total_streams
+            ELSE ic.cdn_cost_monthly * 0.5
+        END as weighted_cdn_cost,
+        -- Storage efficiency
+        ic.storage_cost_monthly / GREATEST(sm.total_streams, 1) as storage_cost_per_stream
+    FROM streaming_metrics sm
+    JOIN infrastructure_costs ic ON sm.content_id = ic.content_id
+    WHERE sm.total_streams >= 100  -- Minimum streams for analysis
+),
+cost_optimization_opportunities AS (
+    SELECT 
+        cca.content_type,
+        cca.genre,
+        cca.quality_tier,
+        -- Aggregate cost metrics
+        COUNT(*) as content_count,
+        SUM(cca.total_streams) as total_streams,
+        SUM(cca.total_cost_monthly) as total_monthly_cost,
+        AVG(cca.cost_per_stream) as avg_cost_per_stream,
+        AVG(cca.streams_per_dollar) as avg_streams_per_dollar,
+        -- Cost distribution
+        SUM(cca.storage_cost_monthly) as total_storage_cost,
+        SUM(cca.cdn_cost_monthly) as total_cdn_cost,
+        SUM(cca.transcoding_cost_monthly) as total_transcoding_cost,
+        -- Performance benchmarks
+        PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY cca.cost_per_stream) as cost_per_stream_25p,
+        PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY cca.cost_per_stream) as cost_per_stream_75p,
+        -- Efficiency gaps
+        (AVG(cca.cost_per_stream) - PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY cca.cost_per_stream)) as cost_efficiency_gap
+    FROM content_cost_analysis cca
+    GROUP BY cca.content_type, cca.genre, cca.quality_tier
+    HAVING COUNT(*) >= 10
+),
+optimization_recommendations AS (
+    SELECT 
+        coo.content_type,
+        coo.genre,
+        coo.quality_tier,
+        coo.total_monthly_cost,
+        coo.avg_cost_per_stream,
+        coo.avg_streams_per_dollar,
+        coo.cost_efficiency_gap,
+        -- Optimization priority
+        CASE 
+            WHEN coo.avg_cost_per_stream > coo.cost_per_stream_75p THEN 'High Priority'
+            WHEN coo.avg_cost_per_stream > coo.cost_per_stream_25p THEN 'Medium Priority'
+            ELSE 'Low Priority'
+        END as optimization_priority,
+        -- Cost reduction opportunities
+        CASE 
+            WHEN coo.total_storage_cost > coo.total_cdn_cost AND coo.total_streams < 1000 THEN 
+                'Consider Archive: High storage cost for low streams'
+            WHEN coo.total_cdn_cost > coo.total_storage_cost * 2 AND coo.quality_tier = '4K' THEN 
+                'Optimize UHD Delivery: High CDN costs'
+            WHEN coo.avg_streams_per_dollar < 10 THEN 
+                'Review Encoding: Low streams per infrastructure dollar'
+            ELSE 'Efficient: Monitor for changes'
+        END as cost_optimization_area,
+        -- Expected savings
+        CASE 
+            WHEN optimization_priority = 'High Priority' THEN coo.total_monthly_cost * 0.25
+            WHEN optimization_priority = 'Medium Priority' THEN coo.total_monthly_cost * 0.15
+            ELSE coo.total_monthly_cost * 0.05
+        END as potential_monthly_savings,
+        -- Implementation complexity
+        CASE 
+            WHEN coo.content_type = 'movie' AND coo.quality_tier = '4K' THEN 'High Complexity'
+            WHEN coo.genre IN ('Documentary', 'Standup') THEN 'Low Complexity'
+            ELSE 'Medium Complexity'
+        END as implementation_complexity
+    FROM cost_optimization_opportunities coo
+)
+SELECT 
+    content_type,
+    genre,
+    quality_tier,
+    total_monthly_cost,
+    avg_cost_per_stream,
+    optimization_priority,
+    cost_optimization_area,
+    potential_monthly_savings,
+    implementation_complexity,
+    -- ROI calculation
+    (potential_monthly_savings * 12) / 
+    CASE 
+        WHEN implementation_complexity = 'High Complexity' THEN 50000
+        WHEN implementation_complexity = 'Medium Complexity' THEN 25000
+        ELSE 10000
+    END as estimated_roi_months,
+    -- Action plan
+    CASE 
+        WHEN optimization_priority = 'High Priority' AND implementation_complexity = 'Low Complexity' THEN 'Implement Immediately'
+        WHEN optimization_priority = 'High Priority' THEN 'Plan Q1 Implementation'
+        WHEN optimization_priority = 'Medium Priority' AND implementation_complexity = 'Low Complexity' THEN 'Plan Q2 Implementation'
+        ELSE 'Monitor and Re-evaluate Next Quarter'
+    END as implementation_timeline,
+    -- Affected content count
+    (SELECT COUNT(*) 
+     FROM content_cost_analysis cca 
+     WHERE cca.content_type = oro.content_type 
+     AND cca.genre = oro.genre 
+     AND cca.quality_tier = oro.quality_tier
+    ) as affected_content_items
+FROM optimization_recommendations oro
+ORDER BY potential_monthly_savings DESC, optimization_priority DESC;

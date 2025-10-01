@@ -1,0 +1,109 @@
+# Predict future user lifetime value based on historical behavior, engagement patterns, and subscription data.
+
+WITH user_historical_data AS (
+    SELECT 
+        u.user_id,
+        u.subscription_type,
+        u.signup_date,
+        u.country,
+        -- Historical revenue
+        (SELECT COUNT(DISTINCT MONTH(vh.start_time)) 
+         FROM viewing_history vh 
+         JOIN user_profiles up ON vh.profile_id = up.profile_id 
+         WHERE up.user_id = u.user_id
+        ) as active_months,
+        -- Engagement metrics
+        COUNT(DISTINCT vh.content_id) as total_content_watched,
+        AVG(vh.completion_percentage) as avg_completion_rate,
+        COUNT(DISTINCT vh.device_type) as devices_used,
+        -- Content variety
+        COUNT(DISTINCT c.genre) as genres_watched,
+        -- Recent activity trend
+        (SELECT COUNT(*) 
+         FROM viewing_history vh2 
+         JOIN user_profiles up2 ON vh2.profile_id = up2.profile_id 
+         WHERE up2.user_id = u.user_id 
+         AND vh2.start_time >= DATE_SUB(CURRENT_DATE, INTERVAL 30 DAY)
+        ) as recent_30d_views,
+        -- Watchlist activity
+        COUNT(DISTINCT wl.content_id) as watchlist_items,
+        -- Rating activity
+        COUNT(DISTINCT ur.rating_id) as ratings_given
+    FROM users u
+    LEFT JOIN user_profiles up ON u.user_id = up.user_id
+    LEFT JOIN viewing_history vh ON up.profile_id = vh.profile_id
+    LEFT JOIN content c ON vh.content_id = c.content_id
+    LEFT JOIN watchlist wl ON up.profile_id = wl.profile_id
+    LEFT JOIN user_ratings ur ON up.profile_id = ur.profile_id
+    WHERE u.signup_date <= DATE_SUB(CURRENT_DATE, INTERVAL 90 DAY)
+    GROUP BY u.user_id, u.subscription_type, u.signup_date, u.country
+),
+subscription_value AS (
+    SELECT 
+        subscription_type,
+        CASE 
+            WHEN subscription_type = 'basic' THEN 9.99
+            WHEN subscription_type = 'premium' THEN 15.99
+            WHEN subscription_type = 'family' THEN 19.99
+            ELSE 0
+        END as monthly_value
+    FROM (SELECT DISTINCT subscription_type FROM users) st
+),
+user_ltv_calculation AS (
+    SELECT 
+        uh.*,
+        sv.monthly_value,
+        -- Churn probability estimation
+        (CASE WHEN uh.recent_30d_views = 0 THEN 0.6 ELSE 0 END +
+         CASE WHEN uh.avg_completion_rate < 40 THEN 0.3 ELSE 0 END +
+         CASE WHEN uh.genres_watched < 3 THEN 0.1 ELSE 0 END) as churn_probability,
+        -- Engagement score
+        (uh.total_content_watched * 0.2 +
+         uh.avg_completion_rate * 0.3 +
+         uh.devices_used * 0.1 +
+         uh.genres_watched * 0.1 +
+         uh.watchlist_items * 0.1 +
+         uh.ratings_given * 0.1 +
+         (uh.recent_30d_views / GREATEST(1, uh.active_months)) * 0.1) as engagement_score
+    FROM user_historical_data uh
+    JOIN subscription_value sv ON uh.subscription_type = sv.subscription_type
+),
+predicted_ltv AS (
+    SELECT 
+        *,
+        -- Expected lifetime in months (complex prediction)
+        (CASE 
+            WHEN engagement_score > 0.8 THEN 24  -- High engagement
+            WHEN engagement_score > 0.5 THEN 12  -- Medium engagement
+            WHEN engagement_score > 0.2 THEN 6   -- Low engagement
+            ELSE 3                                -- Very low engagement
+         END * (1 - churn_probability)) as predicted_remaining_months,
+        -- Historical monthly value
+        (active_months * monthly_value) as historical_revenue
+    FROM user_ltv_calculation
+)
+SELECT 
+    user_id,
+    subscription_type,
+    country,
+    engagement_score,
+    churn_probability,
+    historical_revenue,
+    (predicted_remaining_months * monthly_value) as predicted_future_ltv,
+    (historical_revenue + (predicted_remaining_months * monthly_value)) as total_predicted_ltv,
+    -- LTV segmentation
+    CASE 
+        WHEN total_predicted_ltv > 500 THEN 'VIP'
+        WHEN total_predicted_ltv > 200 THEN 'High Value'
+        WHEN total_predicted_ltv > 100 THEN 'Medium Value'
+        ELSE 'Low Value'
+    END as ltv_segment,
+    -- Retention recommendation
+    CASE 
+        WHEN churn_probability > 0.7 AND total_predicted_ltv > 200 THEN 'High Priority Retention'
+        WHEN churn_probability > 0.5 AND total_predicted_ltv > 100 THEN 'Medium Priority Retention'
+        WHEN churn_probability > 0.3 THEN 'Monitor'
+        ELSE 'Healthy'
+    END as retention_priority
+FROM predicted_ltv
+ORDER BY total_predicted_ltv DESC;

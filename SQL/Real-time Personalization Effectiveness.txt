@@ -1,0 +1,162 @@
+# Measure the impact of real-time personalization features on user engagement and content discovery.
+
+WITH personalization_events AS (
+    -- Hypothetical personalization events table
+    SELECT 
+        pe.event_id,
+        pe.profile_id,
+        pe.event_type, -- 'homepage_rec', 'continue_watching', 'because_you_watched'
+        pe.content_id,
+        pe.algorithm_version,
+        pe.event_timestamp,
+        pe.placement, -- 'hero', 'row1', 'row2'
+        -- User context
+        (SELECT COUNT(DISTINCT vh.content_id)
+         FROM viewing_history vh
+         WHERE vh.profile_id = pe.profile_id
+         AND vh.start_time >= DATE_SUB(pe.event_timestamp, INTERVAL 30 DAY)
+        ) as user_activity_level,
+        -- Time of day
+        HOUR(pe.event_timestamp) as hour_of_day
+    FROM personalization_events pe
+    WHERE pe.event_timestamp >= DATE_SUB(CURRENT_DATE, INTERVAL 60 DAY)
+),
+event_outcomes AS (
+    SELECT 
+        pe.*,
+        -- Click-through rate
+        CASE WHEN EXISTS (
+            SELECT 1 FROM viewing_history vh
+            WHERE vh.profile_id = pe.profile_id
+            AND vh.content_id = pe.content_id
+            AND vh.start_time BETWEEN pe.event_timestamp AND DATE_ADD(pe.event_timestamp, INTERVAL 1 HOUR)
+        ) THEN 1 ELSE 0 END as was_clicked,
+        -- Engagement quality if clicked
+        (SELECT AVG(vh.completion_percentage)
+         FROM viewing_history vh
+         WHERE vh.profile_id = pe.profile_id
+         AND vh.content_id = pe.content_id
+         AND vh.start_time BETWEEN pe.event_timestamp AND DATE_ADD(pe.event_timestamp, INTERVAL 24 HOUR)
+        ) as completion_if_clicked,
+        -- Time to action
+        (SELECT TIMESTAMPDIFF(MINUTE, pe.event_timestamp, MIN(vh.start_time))
+         FROM viewing_history vh
+         WHERE vh.profile_id = pe.profile_id
+         AND vh.content_id = pe.content_id
+         AND vh.start_time >= pe.event_timestamp
+        ) as minutes_to_action
+    FROM personalization_events pe
+),
+personalization_effectiveness AS (
+    SELECT 
+        event_type,
+        algorithm_version,
+        placement,
+        -- Performance metrics
+        COUNT(*) as total_impressions,
+        SUM(was_clicked) as total_clicks,
+        AVG(was_clicked) * 100 as click_through_rate,
+        AVG(CASE WHEN was_clicked = 1 THEN completion_if_clicked ELSE NULL END) as avg_completion_rate,
+        AVG(CASE WHEN was_clicked = 1 THEN minutes_to_action ELSE NULL END) as avg_time_to_action,
+        -- User segment analysis
+        AVG(user_activity_level) as avg_user_activity,
+        -- Temporal patterns
+        AVG(CASE WHEN hour_of_day BETWEEN 18 AND 23 THEN was_clicked ELSE NULL END) as prime_time_ctr,
+        AVG(CASE WHEN hour_of_day BETWEEN 0 AND 6 THEN was_clicked ELSE NULL END) as late_night_ctr
+    FROM event_outcomes
+    GROUP BY event_type, algorithm_version, placement
+    HAVING total_impressions >= 1000
+),
+algorithm_comparison AS (
+    SELECT 
+        pe.event_type,
+        pe.placement,
+        -- Current algorithm performance
+        MAX(CASE WHEN pe.algorithm_version = 'v3.2' THEN pe.click_through_rate END) as current_ctr,
+        -- Previous algorithm performance
+        MAX(CASE WHEN pe.algorithm_version = 'v3.1' THEN pe.click_through_rate END) as previous_ctr,
+        -- Improvement calculation
+        (MAX(CASE WHEN pe.algorithm_version = 'v3.2' THEN pe.click_through_rate END) - 
+         MAX(CASE WHEN pe.algorithm_version = 'v3.1' THEN pe.click_through_rate END)) as ctr_improvement,
+        -- Statistical significance
+        (SELECT SQRT(
+            (p1.click_through_rate * (100 - p1.click_through_rate) / p1.total_impressions) +
+            (p2.click_through_rate * (100 - p2.click_through_rate) / p2.total_impressions)
+         )
+         FROM personalization_effectiveness p1, personalization_effectiveness p2
+         WHERE p1.event_type = pe.event_type AND p1.placement = pe.placement AND p1.algorithm_version = 'v3.2'
+         AND p2.event_type = pe.event_type AND p2.placement = pe.placement AND p2.algorithm_version = 'v3.1'
+        ) as standard_error
+    FROM personalization_effectiveness pe
+    WHERE pe.algorithm_version IN ('v3.1', 'v3.2')
+    GROUP BY pe.event_type, pe.placement
+),
+personalization_impact AS (
+    SELECT 
+        ac.event_type,
+        ac.placement,
+        ac.current_ctr,
+        ac.previous_ctr,
+        ac.ctr_improvement,
+        ac.standard_error,
+        -- Confidence calculation
+        CASE 
+            WHEN ABS(ac.ctr_improvement) > (1.96 * ac.standard_error) THEN '95% Confidence'
+            WHEN ABS(ac.ctr_improvement) > (1.645 * ac.standard_error) THEN '90% Confidence'
+            ELSE 'Not Significant'
+        END as statistical_confidence,
+        -- Business impact
+        (SELECT COUNT(*) FROM personalization_events 
+         WHERE event_type = ac.event_type 
+         AND placement = ac.placement 
+         AND algorithm_version = 'v3.2'
+         AND event_timestamp >= DATE_SUB(CURRENT_DATE, INTERVAL 30 DAY)
+        ) * (ac.ctr_improvement / 100) as additional_clicks_per_month,
+        -- Engagement value
+        (SELECT AVG(eo.completion_if_clicked)
+         FROM event_outcomes eo
+         JOIN personalization_events pe ON eo.event_id = pe.event_id
+         WHERE pe.event_type = ac.event_type 
+         AND pe.placement = ac.placement
+         AND pe.algorithm_version = 'v3.2'
+        ) as avg_engagement_quality
+    FROM algorithm_comparison ac
+)
+SELECT 
+    event_type,
+    placement,
+    current_ctr,
+    previous_ctr,
+    ctr_improvement,
+    statistical_confidence,
+    additional_clicks_per_month,
+    avg_engagement_quality,
+    -- Impact classification
+    CASE 
+        WHEN ctr_improvement > 2 AND statistical_confidence != 'Not Significant' THEN 'High Impact'
+        WHEN ctr_improvement > 1 AND statistical_confidence != 'Not Significant' THEN 'Medium Impact'
+        WHEN ctr_improvement > 0 THEN 'Low Impact'
+        ELSE 'Negative Impact'
+    END as impact_level,
+    -- Optimization recommendations
+    CASE 
+        WHEN impact_level = 'High Impact' AND placement != 'hero' THEN 'Promote to Hero Placement'
+        WHEN impact_level = 'High Impact' AND event_type = 'because_you_watched' THEN 'Expand Similar Content Algorithm'
+        WHEN impact_level = 'Negative Impact' THEN 'Review Algorithm Parameters'
+        WHEN avg_engagement_quality < 50 THEN 'Improve Content Relevance'
+        ELSE 'Maintain Current Implementation'
+    END as optimization_recommendation,
+    -- Scaling opportunity
+    (SELECT COUNT(DISTINCT profile_id) 
+     FROM user_profiles up
+     WHERE NOT EXISTS (
+         SELECT 1 FROM personalization_events pe
+         WHERE pe.profile_id = up.profile_id
+         AND pe.event_type = pi.event_type
+         AND pe.placement = pi.placement
+         AND pe.event_timestamp >= DATE_SUB(CURRENT_DATE, INTERVAL 7 DAY)
+     )
+    ) as untapped_audience
+FROM personalization_impact pi
+ORDER BY additional_clicks_per_month DESC;
+

@@ -1,0 +1,134 @@
+# Analyze regional content preferences and identify localization opportunities across different countries and cultures.
+
+WITH regional_viewership AS (
+    SELECT 
+        u.country,
+        c.genre,
+        c.content_type,
+        c.maturity_rating,
+        -- Viewership metrics
+        COUNT(DISTINCT vh.profile_id) as unique_viewers,
+        COUNT(vh.view_id) as total_views,
+        AVG(vh.completion_percentage) as completion_rate,
+        -- Content origin analysis (hypothetical origin field)
+        CASE 
+            WHEN c.origin_country = u.country THEN 'Domestic'
+            WHEN c.origin_country IN ('US', 'UK', 'CA') THEN 'Western'
+            WHEN c.origin_country IN ('JP', 'KR', 'CN') THEN 'Asian'
+            ELSE 'International'
+        END as content_origin,
+        -- Seasonal patterns
+        QUARTER(vh.start_time) as quarter,
+        -- Time of day patterns
+        CASE 
+            WHEN HOUR(vh.start_time) BETWEEN 6 AND 12 THEN 'Morning'
+            WHEN HOUR(vh.start_time) BETWEEN 12 AND 18 THEN 'Afternoon'
+            WHEN HOUR(vh.start_time) BETWEEN 18 AND 23 THEN 'Evening'
+            ELSE 'Late Night'
+        END as time_of_day
+    FROM viewing_history vh
+    JOIN user_profiles up ON vh.profile_id = up.profile_id
+    JOIN users u ON up.user_id = u.user_id
+    JOIN content c ON vh.content_id = c.content_id
+    WHERE vh.start_time >= DATE_SUB(CURRENT_DATE, INTERVAL 365 DAY)
+    AND u.country IN ('US', 'UK', 'CA', 'DE', 'FR', 'JP', 'KR', 'BR', 'MX', 'IN')
+    GROUP BY u.country, c.genre, c.content_type, c.maturity_rating, content_origin, quarter, time_of_day
+),
+regional_preferences AS (
+    SELECT 
+        country,
+        genre,
+        content_type,
+        content_origin,
+        -- Popularity metrics
+        SUM(unique_viewers) as total_viewers,
+        SUM(total_views) as total_views,
+        AVG(completion_rate) as avg_completion,
+        -- Market share within country
+        SUM(unique_viewers) * 100.0 / (
+            SELECT SUM(unique_viewers) 
+            FROM regional_viewership rv2 
+            WHERE rv2.country = regional_viewership.country
+        ) as market_share_pct,
+        -- Growth trends
+        (SUM(CASE WHEN quarter = 4 THEN unique_viewers ELSE 0 END) - 
+         SUM(CASE WHEN quarter = 1 THEN unique_viewers ELSE 0 END)) / 
+         GREATEST(SUM(CASE WHEN quarter = 1 THEN unique_viewers ELSE 0 END), 1) * 100 as quarterly_growth
+    FROM regional_viewership
+    GROUP BY country, genre, content_type, content_origin
+),
+cross_country_analysis AS (
+    SELECT 
+        rp1.country as country_a,
+        rp2.country as country_b,
+        rp1.genre,
+        rp1.content_type,
+        -- Similarity score
+        (ABS(rp1.market_share_pct - rp2.market_share_pct) * -0.4 +
+         ABS(rp1.avg_completion - rp2.avg_completion) * -0.3 +
+         CASE WHEN rp1.content_origin = rp2.content_origin THEN 0.3 ELSE 0 END) as preference_similarity,
+        -- Content gap analysis
+        (rp2.market_share_pct - rp1.market_share_pct) as content_gap
+    FROM regional_preferences rp1
+    JOIN regional_preferences rp2 ON rp1.genre = rp2.genre 
+                                  AND rp1.content_type = rp2.content_type
+                                  AND rp1.country != rp2.country
+    WHERE rp1.total_viewers >= 1000 AND rp2.total_viewers >= 1000
+),
+localization_opportunities AS (
+    SELECT 
+        cca.country_a,
+        cca.country_b,
+        cca.genre,
+        cca.content_type,
+        cca.preference_similarity,
+        cca.content_gap,
+        -- Localization priority
+        CASE 
+            WHEN cca.preference_similarity > 0.8 AND cca.content_gap > 5 THEN 'High Priority'
+            WHEN cca.preference_similarity > 0.6 AND cca.content_gap > 3 THEN 'Medium Priority'
+            ELSE 'Low Priority'
+        END as localization_priority,
+        -- Recommended content from country_b for country_a
+        (SELECT GROUP_CONCAT(c.title ORDER BY c.imdb_rating DESC LIMIT 5)
+         FROM content c
+         WHERE c.genre = cca.genre
+         AND c.content_type = cca.content_type
+         AND c.origin_country = (
+             SELECT DISTINCT u.country 
+             FROM users u 
+             WHERE u.country = cca.country_b 
+             LIMIT 1
+         )
+         AND c.content_id NOT IN (
+             SELECT DISTINCT vh.content_id
+             FROM viewing_history vh
+             JOIN user_profiles up ON vh.profile_id = up.profile_id
+             JOIN users u ON up.user_id = u.user_id
+             WHERE u.country = cca.country_a
+         )
+         AND c.imdb_rating > 7.0
+        ) as recommended_content
+    FROM cross_country_analysis cca
+    WHERE cca.content_gap > 2
+)
+SELECT 
+    lo.country_a,
+    lo.country_b,
+    lo.genre,
+    lo.content_type,
+    lo.preference_similarity,
+    lo.content_gap,
+    lo.localization_priority,
+    lo.recommended_content,
+    -- Business impact estimation
+    (lo.content_gap * 
+     (SELECT COUNT(DISTINCT u.user_id) 
+      FROM users u 
+      WHERE u.country = lo.country_a)
+     * 0.01 *  -- Assuming 1% conversion
+     (SELECT AVG(subscription_value) FROM subscription_value WHERE subscription_type = 'premium')
+    ) as estimated_revenue_impact
+FROM localization_opportunities lo
+WHERE lo.localization_priority != 'Low Priority'
+ORDER BY lo.localization_priority DESC, lo.estimated_revenue_impact DESC;

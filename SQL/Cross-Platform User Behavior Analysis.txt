@@ -1,0 +1,72 @@
+# Understand how users interact across different devices and how device usage patterns affect content consumption.
+
+WITH user_device_patterns AS (
+    SELECT 
+        up.profile_id,
+        u.user_id,
+        u.subscription_type,
+        -- Device usage patterns
+        COUNT(DISTINCT vh.device_type) as unique_devices_used,
+        -- Primary device (most used)
+        (SELECT device_type 
+         FROM viewing_history vh2 
+         WHERE vh2.profile_id = up.profile_id 
+         GROUP BY device_type 
+         ORDER BY COUNT(*) DESC 
+         LIMIT 1
+        ) as primary_device,
+        -- Device switching frequency
+        (SELECT COUNT(*) 
+         FROM (
+             SELECT DATE(vh3.start_time), vh3.device_type
+             FROM viewing_history vh3
+             WHERE vh3.profile_id = up.profile_id
+             GROUP BY DATE(vh3.start_time), vh3.device_type
+         ) as daily_devices
+        ) as device_switching_count,
+        -- Content consumption metrics
+        COUNT(DISTINCT vh.content_id) as unique_content_watched,
+        AVG(vh.completion_percentage) as avg_completion_rate,
+        -- Time-based patterns
+        AVG(CASE WHEN HOUR(vh.start_time) BETWEEN 6 AND 18 THEN 1 ELSE 0 END) as day_viewing_ratio,
+        AVG(CASE WHEN HOUR(vh.start_time) BETWEEN 19 AND 23 OR HOUR(vh.start_time) BETWEEN 0 AND 5 THEN 1 ELSE 0 END) as night_viewing_ratio
+    FROM user_profiles up
+    JOIN users u ON up.user_id = u.user_id
+    JOIN viewing_history vh ON up.profile_id = vh.profile_id
+    WHERE vh.start_time >= DATE_SUB(CURRENT_DATE, INTERVAL 60 DAY)
+    GROUP BY up.profile_id, u.user_id, u.subscription_type
+    HAVING COUNT(vh.view_id) >= 10
+),
+device_engagement AS (
+    SELECT 
+        udp.*,
+        CASE 
+            WHEN unique_devices_used = 1 THEN 'Single Device'
+            WHEN unique_devices_used = 2 THEN 'Two Devices'
+            ELSE 'Multi-Device'
+        END as device_usage_category,
+        CASE 
+            WHEN device_switching_count / GREATEST(1, DATEDIFF(CURRENT_DATE, DATE_SUB(CURRENT_DATE, INTERVAL 60 DAY))) > 0.5 
+            THEN 'High Switcher'
+            ELSE 'Low Switcher'
+        END as switching_frequency
+    FROM user_device_patterns udp
+)
+SELECT 
+    primary_device,
+    device_usage_category,
+    switching_frequency,
+    subscription_type,
+    COUNT(*) as user_count,
+    AVG(unique_content_watched) as avg_unique_content,
+    AVG(avg_completion_rate) as avg_completion,
+    AVG(day_viewing_ratio) as avg_day_viewing,
+    AVG(night_viewing_ratio) as avg_night_viewing,
+    -- Engagement score calculation
+    (AVG(unique_content_watched) * 0.3 + 
+     AVG(avg_completion_rate) * 0.4 + 
+     (AVG(day_viewing_ratio) + AVG(night_viewing_ratio)) * 0.3) as engagement_score
+FROM device_engagement
+GROUP BY primary_device, device_usage_category, switching_frequency, subscription_type
+HAVING COUNT(*) >= 5
+ORDER BY engagement_score DESC;

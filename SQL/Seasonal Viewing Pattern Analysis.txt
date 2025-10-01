@@ -1,0 +1,108 @@
+# Analyze how viewing patterns change across seasons, holidays, and days of the week to optimize content scheduling.
+
+WITH time_based_metrics AS (
+    SELECT 
+        -- Time dimensions
+        YEAR(vh.start_time) as view_year,
+        MONTH(vh.start_time) as view_month,
+        DAYOFWEEK(vh.start_time) as day_of_week,
+        CASE 
+            WHEN MONTH(vh.start_time) IN (12,1,2) THEN 'Winter'
+            WHEN MONTH(vh.start_time) IN (3,4,5) THEN 'Spring'
+            WHEN MONTH(vh.start_time) IN (6,7,8) THEN 'Summer'
+            ELSE 'Fall'
+        END as season,
+        -- Holiday detection
+        CASE 
+            WHEN MONTH(vh.start_time) = 12 AND DAY(vh.start_time) BETWEEN 20 AND 31 THEN 'Christmas'
+            WHEN MONTH(vh.start_time) = 7 AND DAY(vh.start_time) BETWEEN 1 AND 7 THEN 'Summer Holiday'
+            WHEN MONTH(vh.start_time) = 3 AND DAY(vh.start_time) BETWEEN 15 AND 21 THEN 'Spring Break'
+            ELSE 'Regular'
+        END as holiday_period,
+        -- Content metrics
+        c.genre,
+        c.content_type,
+        c.maturity_rating,
+        -- Engagement metrics
+        COUNT(*) as total_views,
+        COUNT(DISTINCT vh.profile_id) as unique_viewers,
+        AVG(vh.completion_percentage) as avg_completion,
+        AVG(TIMESTAMPDIFF(MINUTE, vh.start_time, vh.end_time)) as avg_watch_duration,
+        -- Binge watching indicator
+        COUNT(CASE WHEN TIMESTAMPDIFF(MINUTE, vh.start_time, vh.end_time) > 120 THEN 1 END) as long_session_views
+    FROM viewing_history vh
+    JOIN content c ON vh.content_id = c.content_id
+    WHERE vh.start_time >= DATE_SUB(CURRENT_DATE, INTERVAL 2 YEAR)
+    GROUP BY 
+        YEAR(vh.start_time), MONTH(vh.start_time), DAYOFWEEK(vh.start_time),
+        season, holiday_period, c.genre, c.content_type, c.maturity_rating
+),
+seasonal_trends AS (
+    SELECT 
+        season,
+        holiday_period,
+        day_of_week,
+        genre,
+        content_type,
+        maturity_rating,
+        -- Average metrics
+        AVG(total_views) as avg_views,
+        AVG(unique_viewers) as avg_unique_viewers,
+        AVG(avg_completion) as avg_completion_rate,
+        AVG(avg_watch_duration) as avg_watch_duration,
+        AVG(long_session_views) as avg_long_sessions,
+        -- Trend analysis
+        (AVG(total_views) - LAG(AVG(total_views)) OVER (
+            PARTITION BY genre, content_type, day_of_week 
+            ORDER BY season, holiday_period
+        )) / LAG(AVG(total_views)) OVER (
+            PARTITION BY genre, content_type, day_of_week 
+            ORDER BY season, holiday_period
+        ) * 100 as view_growth_percent,
+        -- Seasonal index calculation
+        AVG(total_views) / (SELECT AVG(total_views) FROM time_based_metrics) as seasonal_index
+    FROM time_based_metrics
+    GROUP BY season, holiday_period, day_of_week, genre, content_type, maturity_rating
+),
+content_seasonal_performance AS (
+    SELECT 
+        st.*,
+        -- Performance classification
+        CASE 
+            WHEN seasonal_index > 1.2 THEN 'High Seasonal'
+            WHEN seasonal_index > 0.8 THEN 'Moderate Seasonal'
+            ELSE 'Low Seasonal'
+        END as seasonal_performance,
+        -- Opportunity score
+        (CASE WHEN st.seasonal_index > 1.5 THEN 1 ELSE 0 END * 0.4 +
+         CASE WHEN st.view_growth_percent > 20 THEN 1 ELSE 0 END * 0.3 +
+         CASE WHEN st.avg_long_sessions > AVG(st.avg_long_sessions) OVER() THEN 1 ELSE 0 END * 0.3) as scheduling_opportunity_score
+    FROM seasonal_trends st
+)
+SELECT 
+    season,
+    holiday_period,
+    day_of_week,
+    genre,
+    content_type,
+    seasonal_performance,
+    scheduling_opportunity_score,
+    avg_views,
+    avg_completion_rate,
+    seasonal_index,
+    -- Content recommendations for scheduling
+    (SELECT GROUP_CONCAT(DISTINCT c.title ORDER BY c.imdb_rating DESC LIMIT 3)
+     FROM content c
+     WHERE c.genre = csp.genre 
+     AND c.content_type = csp.content_type
+     AND c.release_year >= YEAR(CURRENT_DATE) - 3
+     AND c.content_id NOT IN (
+         SELECT DISTINCT vh.content_id
+         FROM viewing_history vh
+         WHERE YEAR(vh.start_time) = YEAR(CURRENT_DATE)
+         AND MONTH(vh.start_time) = MONTH(CURRENT_DATE)
+     )
+    ) as recommended_content
+FROM content_seasonal_performance csp
+WHERE scheduling_opportunity_score >= 0.5
+ORDER BY season, scheduling_opportunity_score DESC;

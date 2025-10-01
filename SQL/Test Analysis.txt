@@ -1,0 +1,120 @@
+# Analyze the impact of UI/UX changes on user engagement, content discovery, and retention.
+
+WITH ab_test_groups AS (
+    SELECT 
+        up.profile_id,
+        u.user_id,
+        -- A/B Test group assignment (hypothetical feature test)
+        CASE 
+            WHEN up.profile_id % 3 = 0 THEN 'Control'
+            WHEN up.profile_id % 3 = 1 THEN 'Variant_A'
+            ELSE 'Variant_B'
+        END as test_group,
+        -- Test period (assuming 60-day test)
+        CASE 
+            WHEN up.created_date >= '2024-01-01' THEN 'Test_Period'
+            ELSE 'Pre_Test'
+        END as period
+    FROM user_profiles up
+    JOIN users u ON up.user_id = u.user_id
+    WHERE up.created_date BETWEEN DATE_SUB('2024-01-01', INTERVAL 120 DAY) AND '2024-03-01'
+),
+user_metrics AS (
+    SELECT 
+        ag.test_group,
+        ag.period,
+        ag.user_id,
+        -- Engagement metrics
+        COUNT(DISTINCT vh.content_id) as content_watched,
+        COUNT(vh.view_id) as total_views,
+        AVG(vh.completion_percentage) as completion_rate,
+        -- Content discovery metrics
+        COUNT(DISTINCT CASE WHEN vh.content_id NOT IN (
+            SELECT DISTINCT vh2.content_id 
+            FROM viewing_history vh2 
+            WHERE vh2.profile_id = vh.profile_id 
+            AND vh2.start_time < '2024-01-01'
+        ) THEN vh.content_id END) as new_content_discovered,
+        -- Session metrics
+        AVG(TIMESTAMPDIFF(MINUTE, vh.start_time, vh.end_time)) as avg_session_duration,
+        -- Feature usage (hypothetical new feature)
+        COUNT(DISTINCT CASE WHEN vh.device_type = 'new_feature_device' THEN vh.view_id END) as new_feature_usage
+    FROM ab_test_groups ag
+    LEFT JOIN viewing_history vh ON ag.profile_id = vh.profile_id
+    AND vh.start_time BETWEEN 
+        CASE WHEN ag.period = 'Pre_Test' THEN DATE_SUB('2024-01-01', INTERVAL 60 DAY) ELSE '2024-01-01' END
+        AND CASE WHEN ag.period = 'Pre_Test' THEN '2024-01-01' ELSE '2024-03-01' END
+    GROUP BY ag.test_group, ag.period, ag.user_id
+),
+statistical_analysis AS (
+    SELECT 
+        test_group,
+        period,
+        COUNT(DISTINCT user_id) as user_count,
+        -- Average metrics
+        AVG(content_watched) as avg_content_watched,
+        AVG(total_views) as avg_total_views,
+        AVG(completion_rate) as avg_completion_rate,
+        AVG(new_content_discovered) as avg_new_content,
+        AVG(avg_session_duration) as avg_session_duration,
+        AVG(new_feature_usage) as avg_feature_usage,
+        -- Standard deviations for confidence intervals
+        STDDEV(content_watched) as std_content_watched,
+        STDDEV(total_views) as std_total_views,
+        -- Statistical significance calculation
+        (AVG(content_watched) - 
+         (SELECT AVG(content_watched) 
+          FROM user_metrics um2 
+          WHERE um2.test_group = 'Control' AND um2.period = user_metrics.period)
+        ) / GREATEST(STDDEV(content_watched), 0.001) as content_watched_z_score
+    FROM user_metrics
+    GROUP BY test_group, period
+),
+test_results AS (
+    SELECT 
+        sa.*,
+        -- Lift calculations
+        (sa.avg_content_watched / control.avg_content_watched - 1) * 100 as content_watched_lift,
+        (sa.avg_completion_rate / control.avg_completion_rate - 1) * 100 as completion_lift,
+        (sa.avg_new_content / control.avg_new_content - 1) * 100 as discovery_lift,
+        -- Confidence level
+        CASE 
+            WHEN ABS(sa.content_watched_z_score) > 1.96 THEN '95% Confidence'
+            WHEN ABS(sa.content_watched_z_score) > 1.645 THEN '90% Confidence'
+            ELSE 'Not Significant'
+        END as statistical_significance,
+        -- Overall impact score
+        (CASE WHEN sa.content_watched_z_score > 0 THEN 1 ELSE -1 END * 0.4 +
+         CASE WHEN (sa.avg_completion_rate - control.avg_completion_rate) > 0 THEN 1 ELSE -1 END * 0.3 +
+         CASE WHEN (sa.avg_new_content - control.avg_new_content) > 0 THEN 1 ELSE -1 END * 0.3) as overall_impact_score
+    FROM statistical_analysis sa
+    CROSS JOIN (
+        SELECT 
+            avg_content_watched,
+            avg_completion_rate,
+            avg_new_content
+        FROM statistical_analysis 
+        WHERE test_group = 'Control' AND period = 'Test_Period'
+    ) control
+    WHERE sa.period = 'Test_Period'
+)
+SELECT 
+    test_group,
+    user_count,
+    avg_content_watched,
+    avg_completion_rate,
+    avg_new_content,
+    content_watched_lift,
+    completion_lift,
+    discovery_lift,
+    statistical_significance,
+    overall_impact_score,
+    -- Business recommendation
+    CASE 
+        WHEN overall_impact_score > 0.5 AND statistical_significance != 'Not Significant' THEN 'Implement Feature'
+        WHEN overall_impact_score > 0.2 AND statistical_significance != 'Not Significant' THEN 'Consider Implementation'
+        WHEN overall_impact_score < -0.2 THEN 'Reject Feature'
+        ELSE 'Requires More Testing'
+    END as business_recommendation
+FROM test_results
+ORDER BY test_group;

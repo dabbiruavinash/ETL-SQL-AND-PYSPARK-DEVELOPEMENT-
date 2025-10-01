@@ -1,0 +1,103 @@
+-- Users and Profiles
+CREATE TABLE users (
+    user_id INT PRIMARY KEY,
+    email VARCHAR(255),
+    signup_date DATE,
+    subscription_type ENUM('basic', 'premium', 'family'),
+    country VARCHAR(100),
+    age INT
+);
+
+CREATE TABLE user_profiles (
+    profile_id INT PRIMARY KEY,
+    user_id INT,
+    profile_name VARCHAR(100),
+    created_date DATE,
+    is_kid_profile BOOLEAN,
+    FOREIGN KEY (user_id) REFERENCES users(user_id)
+);
+
+-- Content Catalog
+CREATE TABLE content (
+    content_id INT PRIMARY KEY,
+    title VARCHAR(255),
+    content_type ENUM('movie', 'tv_show', 'documentary', 'standup'),
+    genre VARCHAR(100),
+    release_year INT,
+    duration_minutes INT,
+    maturity_rating VARCHAR(10),
+    imdb_rating DECIMAL(3,1),
+    added_date DATE
+);
+
+CREATE TABLE tv_episodes (
+    episode_id INT PRIMARY KEY,
+    tv_show_id INT,
+    season_number INT,
+    episode_number INT,
+    title VARCHAR(255),
+    duration_minutes INT,
+    release_date DATE,
+    FOREIGN KEY (tv_show_id) REFERENCES content(content_id)
+);
+
+CREATE TABLE actors (
+    actor_id INT PRIMARY KEY,
+    actor_name VARCHAR(255)
+);
+
+CREATE TABLE content_actors (
+    content_id INT,
+    actor_id INT,
+    PRIMARY KEY (content_id, actor_id),
+    FOREIGN KEY (content_id) REFERENCES content(content_id),
+    FOREIGN KEY (actor_id) REFERENCES actors(actor_id)
+);
+
+-- Viewing Activity
+CREATE TABLE viewing_history (
+    view_id INT PRIMARY KEY,
+    profile_id INT,
+    content_id INT,
+    episode_id INT NULL,
+    start_time DATETIME,
+    end_time DATETIME,
+    device_type VARCHAR(50),
+    completion_percentage DECIMAL(5,2),
+    FOREIGN KEY (profile_id) REFERENCES user_profiles(profile_id),
+    FOREIGN KEY (content_id) REFERENCES content(content_id),
+    FOREIGN KEY (episode_id) REFERENCES tv_episodes(episode_id)
+);
+
+CREATE TABLE watchlist (
+    watchlist_id INT PRIMARY KEY,
+    profile_id INT,
+    content_id INT,
+    added_date DATE,
+    FOREIGN KEY (profile_id) REFERENCES user_profiles(profile_id),
+    FOREIGN KEY (content_id) REFERENCES content(content_id)
+);
+
+-- Ratings and Reviews
+CREATE TABLE user_ratings (
+    rating_id INT PRIMARY KEY,
+    profile_id INT,
+    content_id INT,
+    rating DECIMAL(2,1),
+    review_text TEXT,
+    rating_date DATE,
+    FOREIGN KEY (profile_id) REFERENCES user_profiles(profile_id),
+    FOREIGN KEY (content_id) REFERENCES content(content_id)
+);
+
+-- Content Recommendations
+CREATE TABLE recommendations (
+    recommendation_id INT PRIMARY KEY,
+    profile_id INT,
+    content_id INT,
+    recommendation_score DECIMAL(5,4),
+    algorithm_version VARCHAR(50),
+    created_date DATE,
+    FOREIGN KEY (profile_id) REFERENCES user_profiles(profile_id),
+    FOREIGN KEY (content_id) REFERENCES content(content_id)
+);

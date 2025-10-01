@@ -1,0 +1,97 @@
+# Evaluate the effectiveness of different recommendation algorithms and identify patterns in user acceptance.
+
+WITH recommendation_performance AS (
+    SELECT 
+        r.algorithm_version,
+        r.profile_id,
+        r.content_id,
+        r.recommendation_score,
+        -- Track if recommendation was acted upon
+        CASE 
+            WHEN EXISTS (
+                SELECT 1 FROM viewing_history vh 
+                WHERE vh.profile_id = r.profile_id 
+                AND vh.content_id = r.content_id
+                AND vh.start_time BETWEEN r.created_date AND DATE_ADD(r.created_date, INTERVAL 30 DAY)
+            ) THEN 1 
+            ELSE 0 
+        END as was_watched,
+        -- Time to watch (if watched)
+        (SELECT TIMESTAMPDIFF(HOUR, r.created_date, MIN(vh.start_time))
+         FROM viewing_history vh 
+         WHERE vh.profile_id = r.profile_id 
+         AND vh.content_id = r.content_id
+         AND vh.start_time >= r.created_date
+        ) as hours_to_watch,
+        -- Watch completion if watched
+        (SELECT AVG(vh.completion_percentage)
+         FROM viewing_history vh 
+         WHERE vh.profile_id = r.profile_id 
+         AND vh.content_id = r.content_id
+         AND vh.start_time >= r.created_date
+        ) as completion_if_watched,
+        -- User preferences
+        (SELECT COUNT(*) FROM viewing_history vh2 
+         WHERE vh2.profile_id = r.profile_id 
+         AND vh2.start_time >= DATE_SUB(r.created_date, INTERVAL 90 DAY)
+        ) as user_activity_level,
+        -- Content similarity score
+        (SELECT COUNT(*) 
+         FROM viewing_history vh3 
+         JOIN content c_hist ON vh3.content_id = c_hist.content_id
+         JOIN content c_rec ON r.content_id = c_rec.content_id
+         WHERE vh3.profile_id = r.profile_id 
+         AND vh3.start_time >= DATE_SUB(r.created_date, INTERVAL 90 DAY)
+         AND c_hist.genre = c_rec.genre
+        ) as genre_match_count
+    FROM recommendations r
+    WHERE r.created_date >= DATE_SUB(CURRENT_DATE, INTERVAL 180 DAY)
+),
+algorithm_metrics AS (
+    SELECT 
+        algorithm_version,
+        -- Basic metrics
+        COUNT(*) as total_recommendations,
+        SUM(was_watched) as accepted_recommendations,
+        AVG(was_watched) * 100 as acceptance_rate,
+        -- Performance metrics
+        AVG(CASE WHEN was_watched = 1 THEN hours_to_watch ELSE NULL END) as avg_time_to_watch,
+        AVG(CASE WHEN was_watched = 1 THEN completion_if_watched ELSE NULL END) as avg_completion_rate,
+        -- User segmentation analysis
+        AVG(user_activity_level) as avg_user_activity,
+        AVG(genre_match_count) as avg_genre_matches,
+        -- Score effectiveness
+        CORR(recommendation_score, was_watched) as score_correlation
+    FROM recommendation_performance
+    GROUP BY algorithm_version
+),
+user_segment_analysis AS (
+    SELECT 
+        rp.algorithm_version,
+        CASE 
+            WHEN rp.user_activity_level < 10 THEN 'Low Activity'
+            WHEN rp.user_activity_level < 50 THEN 'Medium Activity'
+            ELSE 'High Activity'
+        END as user_segment,
+        COUNT(*) as recommendations_count,
+        AVG(rp.was_watched) * 100 as segment_acceptance_rate,
+        AVG(rp.recommendation_score) as avg_recommendation_score
+    FROM recommendation_performance rp
+    GROUP BY rp.algorithm_version, user_segment
+)
+SELECT 
+    am.algorithm_version,
+    am.total_recommendations,
+    am.acceptance_rate,
+    am.avg_time_to_watch,
+    am.avg_completion_rate,
+    am.score_correlation,
+    -- Segment performance
+    MAX(CASE WHEN usa.user_segment = 'Low Activity' THEN usa.segment_acceptance_rate END) as low_activity_acceptance,
+    MAX(CASE WHEN usa.user_segment = 'Medium Activity' THEN usa.segment_acceptance_rate END) as medium_activity_acceptance,
+    MAX(CASE WHEN usa.user_segment = 'High Activity' THEN usa.segment_acceptance_rate END) as high_activity_acceptance
+FROM algorithm_metrics am
+JOIN user_segment_analysis usa ON am.algorithm_version = usa.algorithm_version
+GROUP BY am.algorithm_version, am.total_recommendations, am.acceptance_rate, 
+         am.avg_time_to_watch, am.avg_completion_rate, am.score_correlation
+ORDER BY am.acceptance_rate DESC;

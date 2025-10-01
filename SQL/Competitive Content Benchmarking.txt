@@ -1,0 +1,142 @@
+# Benchmark content performance against industry standards and identify competitive advantages.
+
+WITH industry_benchmarks AS (
+    -- Hypothetical industry benchmark data
+    SELECT 
+        genre,
+        content_type,
+        maturity_rating,
+        -- Industry standard metrics
+        AVG(total_viewers) as industry_avg_viewers,
+        AVG(completion_rate) as industry_avg_completion,
+        AVG(imdb_rating) as industry_avg_rating,
+        AVG(cost_per_viewer) as industry_avg_cpv,
+        -- Performance thresholds
+        PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY total_viewers) as industry_top_25_viewers,
+        PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY completion_rate) as industry_top_10_completion
+    FROM industry_content_data
+    WHERE release_year >= YEAR(CURRENT_DATE) - 3
+    GROUP BY genre, content_type, maturity_rating
+),
+platform_performance AS (
+    SELECT 
+        c.content_id,
+        c.title,
+        c.genre,
+        c.content_type,
+        c.maturity_rating,
+        c.imdb_rating,
+        c.release_year,
+        -- Platform performance metrics
+        COUNT(DISTINCT vh.profile_id) as platform_viewers,
+        COUNT(vh.view_id) as platform_views,
+        AVG(vh.completion_percentage) as platform_completion_rate,
+        -- Engagement metrics
+        SUM(TIMESTAMPDIFF(MINUTE, vh.start_time, vh.end_time)) as total_watch_time,
+        -- Cost metrics (from production_costs)
+        COALESCE(pc.production_budget, 0) + COALESCE(pc.marketing_budget, 0) as total_cost,
+        -- Efficiency metrics
+        CASE 
+            WHEN (COALESCE(pc.production_budget, 0) + COALESCE(pc.marketing_budget, 0)) > 0 THEN
+                COUNT(DISTINCT vh.profile_id) / (COALESCE(pc.production_budget, 0) + COALESCE(pc.marketing_budget, 0)) * 1000
+            ELSE NULL
+        END as viewers_per_thousand_dollars
+    FROM content c
+    LEFT JOIN viewing_history vh ON c.content_id = vh.content_id
+    LEFT JOIN production_costs pc ON c.content_id = pc.content_id
+    WHERE c.release_year >= YEAR(CURRENT_DATE) - 3
+    GROUP BY c.content_id, c.title, c.genre, c.content_type, c.maturity_rating, 
+             c.imdb_rating, c.release_year, pc.production_budget, pc.marketing_budget
+),
+competitive_analysis AS (
+    SELECT 
+        pp.*,
+        ib.industry_avg_viewers,
+        ib.industry_avg_completion,
+        ib.industry_avg_rating,
+        ib.industry_avg_cpv,
+        ib.industry_top_25_viewers,
+        ib.industry_top_10_completion,
+        -- Performance gaps
+        (pp.platform_viewers - ib.industry_avg_viewers) as viewer_gap_vs_industry,
+        (pp.platform_completion_rate - ib.industry_avg_completion) as completion_gap_vs_industry,
+        (pp.imdb_rating - ib.industry_avg_rating) as rating_gap_vs_industry,
+        -- Competitive positioning
+        CASE 
+            WHEN pp.platform_viewers >= ib.industry_top_25_viewers THEN 'Industry Leader'
+            WHEN pp.platform_viewers >= ib.industry_avg_viewers THEN 'Above Average'
+            WHEN pp.platform_viewers >= ib.industry_avg_viewers * 0.7 THEN 'Industry Average'
+            ELSE 'Below Average'
+        END as viewer_performance_tier,
+        CASE 
+            WHEN pp.platform_completion_rate >= ib.industry_top_10_completion THEN 'Excellent Retention'
+            WHEN pp.platform_completion_rate >= ib.industry_avg_completion THEN 'Good Retention'
+            ELSE 'Needs Improvement'
+        END as retention_performance_tier
+    FROM platform_performance pp
+    JOIN industry_benchmarks ib ON pp.genre = ib.genre 
+                               AND pp.content_type = ib.content_type
+                               AND pp.maturity_rating = ib.maturity_rating
+    WHERE pp.platform_viewers >= 1000  -- Minimum sample size
+),
+competitive_advantages AS (
+    SELECT 
+        ca.*,
+        -- Overall competitive score
+        (CASE WHEN ca.viewer_performance_tier = 'Industry Leader' THEN 1.0
+              WHEN ca.viewer_performance_tier = 'Above Average' THEN 0.7
+              WHEN ca.viewer_performance_tier = 'Industry Average' THEN 0.5
+              ELSE 0.3 END * 0.4 +
+         CASE WHEN ca.retention_performance_tier = 'Excellent Retention' THEN 1.0
+              WHEN ca.retention_performance_tier = 'Good Retention' THEN 0.7
+              ELSE 0.3 END * 0.3 +
+         CASE WHEN ca.rating_gap_vs_industry > 0.5 THEN 1.0
+              WHEN ca.rating_gap_vs_industry > 0 THEN 0.7
+              ELSE 0.3 END * 0.3) as competitive_score,
+        -- Strengths and weaknesses
+        CASE 
+            WHEN ca.viewer_gap_vs_industry > 1000 AND ca.completion_gap_vs_industry > 5 THEN 'Dual Strength: Reach & Engagement'
+            WHEN ca.viewer_gap_vs_industry > 1000 THEN 'Strength: Broad Appeal'
+            WHEN ca.completion_gap_vs_industry > 5 THEN 'Strength: High Engagement'
+            WHEN ca.rating_gap_vs_industry > 0.5 THEN 'Strength: Critical Acclaim'
+            ELSE 'No Clear Competitive Advantage'
+        END as competitive_advantage
+    FROM competitive_analysis ca
+)
+SELECT 
+    content_id,
+    title,
+    genre,
+    content_type,
+    platform_viewers,
+    platform_completion_rate,
+    imdb_rating,
+    competitive_score,
+    competitive_advantage,
+    viewer_performance_tier,
+    retention_performance_tier,
+    -- Strategic recommendations
+    CASE 
+        WHEN competitive_score > 0.8 THEN 'Leverage as Flagship Content'
+        WHEN competitive_score > 0.6 AND viewer_gap_vs_industry > 0 THEN 'Scale Promotion'
+        WHEN competitive_score < 0.4 AND completion_gap_vs_industry < 0 THEN 'Improve Content Quality'
+        WHEN competitive_score < 0.4 AND viewer_gap_vs_industry < 0 THEN 'Enhance Discovery'
+        ELSE 'Maintain Current Strategy'
+    END as strategic_recommendation,
+    -- Learning opportunities
+    (SELECT GROUP_CONCAT(DISTINCT ca2.genre ORDER BY ca2.competitive_score DESC LIMIT 3)
+     FROM competitive_advantages ca2
+     WHERE ca2.competitive_score > ca.competitive_score
+     AND ca2.content_type = ca.content_type
+     AND ca2.maturity_rating = ca.maturity_rating
+    ) as higher_performing_genres,
+    -- Production insights
+    (SELECT AVG(pc2.production_budget)
+     FROM production_costs pc2
+     JOIN competitive_advantages ca2 ON pc2.content_id = ca2.content_id
+     WHERE ca2.competitive_score > 0.8
+     AND ca2.genre = ca.genre
+     AND ca2.content_type = ca.content_type
+    ) as successful_content_budget
+FROM competitive_advantages ca
+ORDER BY competitive_score DESC, platform_viewers DESC;

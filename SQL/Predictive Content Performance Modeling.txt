@@ -1,0 +1,138 @@
+# Build a predictive model to forecast content performance before acquisition using historical patterns and metadata.
+
+WITH content_features AS (
+    SELECT 
+        c.content_id,
+        c.title,
+        c.content_type,
+        c.genre,
+        c.release_year,
+        c.duration_minutes,
+        c.maturity_rating,
+        c.imdb_rating,
+        -- Actor popularity features
+        (SELECT AVG(actor_popularity.avg_rating) 
+         FROM (
+             SELECT ca2.content_id, AVG(c3.imdb_rating) as avg_rating
+             FROM content_actors ca2
+             JOIN content c3 ON ca2.content_id = c3.content_id
+             WHERE ca2.actor_id IN (
+                 SELECT actor_id FROM content_actors WHERE content_id = c.content_id
+             )
+             AND c3.content_id != c.content_id
+             GROUP BY ca2.content_id
+         ) actor_popularity
+        ) as actor_avg_rating,
+        -- Genre performance history
+        (SELECT AVG(vh4.completion_percentage)
+         FROM viewing_history vh4
+         JOIN content c4 ON vh4.content_id = c4.content_id
+         WHERE c4.genre = c.genre
+         AND c4.release_year BETWEEN c.release_year - 5 AND c.release_year - 1
+        ) as genre_avg_completion,
+        -- Director success rate (hypothetical director table)
+        (SELECT COUNT(*) 
+         FROM content c5 
+         WHERE c5.content_id IN (
+             SELECT content_id FROM content_directors WHERE director_id IN (
+                 SELECT director_id FROM content_directors WHERE content_id = c.content_id
+             )
+         )
+         AND c5.imdb_rating > 7.0
+        ) as director_high_rated_content,
+        -- Seasonal suitability
+        CASE 
+            WHEN c.genre IN ('Horror', 'Thriller') AND MONTH(c.added_date) IN (10, 11) THEN 1.2
+            WHEN c.genre IN ('Romance', 'Comedy') AND MONTH(c.added_date) IN (2, 12) THEN 1.15
+            WHEN c.genre IN ('Action', 'Adventure') AND MONTH(c.added_date) IN (6, 7) THEN 1.1
+            ELSE 1.0
+        END as seasonal_multiplier
+    FROM content c
+    WHERE c.release_year >= YEAR(CURRENT_DATE) - 10
+),
+historical_performance AS (
+    SELECT 
+        cf.*,
+        -- Actual performance metrics
+        COUNT(DISTINCT vh.profile_id) as actual_viewers,
+        AVG(vh.completion_percentage) as actual_completion_rate,
+        COUNT(vh.view_id) as total_views,
+        -- Engagement metrics
+        COUNT(DISTINCT DATE(vh.start_time)) as active_days,
+        (SELECT COUNT(DISTINCT up.user_id)
+         FROM viewing_history vh2
+         JOIN user_profiles up ON vh2.profile_id = up.profile_id
+         WHERE vh2.content_id = cf.content_id
+         AND vh2.start_time BETWEEN DATE_ADD(cf.added_date, INTERVAL 31 DAY) 
+                             AND DATE_ADD(cf.added_date, INTERVAL 90 DAY)
+        ) as long_term_viewers
+    FROM content_features cf
+    LEFT JOIN viewing_history vh ON cf.content_id = vh.content_id
+    WHERE cf.content_id IN (SELECT content_id FROM content WHERE added_date <= DATE_SUB(CURRENT_DATE, INTERVAL 90 DAY))
+    GROUP BY cf.content_id, cf.title, cf.content_type, cf.genre, cf.release_year, 
+             cf.duration_minutes, cf.maturity_rating, cf.imdb_rating, cf.actor_avg_rating,
+             cf.genre_avg_completion, cf.director_high_rated_content, cf.seasonal_multiplier
+),
+performance_prediction AS (
+    SELECT 
+        hp.*,
+        -- Predictive model features
+        (hp.imdb_rating * 0.25 +
+         hp.actor_avg_rating * 0.20 +
+         hp.genre_avg_completion / 100 * 0.15 +
+         (hp.director_high_rated_content / 10) * 0.10 +
+         hp.seasonal_multiplier * 0.30) as predicted_success_score,
+        -- Expected viewers prediction
+        (hp.imdb_rating * 1000 + 
+         hp.actor_avg_rating * 500 +
+         hp.genre_avg_completion * 10) as predicted_viewers,
+        -- Performance classification
+        CASE 
+            WHEN hp.actual_completion_rate > 80 THEN 'High Performance'
+            WHEN hp.actual_completion_rate > 60 THEN 'Medium Performance'
+            ELSE 'Low Performance'
+        END as performance_category
+    FROM historical_performance hp
+),
+model_accuracy AS (
+    SELECT 
+        -- Model accuracy metrics
+        AVG(ABS(pp.predicted_viewers - pp.actual_viewers) / pp.actual_viewers) * 100 as viewers_mape,
+        AVG(ABS(pp.predicted_success_score * 100 - pp.actual_completion_rate)) as completion_mae,
+        CORR(pp.predicted_success_score, pp.actual_completion_rate) as success_correlation,
+        -- Model performance by genre
+        genre,
+        COUNT(*) as sample_size,
+        AVG(ABS(pp.predicted_viewers - pp.actual_viewers) / pp.actual_viewers) * 100 as genre_mape
+    FROM performance_prediction pp
+    WHERE pp.actual_viewers > 0
+    GROUP BY genre
+    HAVING COUNT(*) >= 10
+)
+SELECT 
+    pp.content_id,
+    pp.title,
+    pp.content_type,
+    pp.genre,
+    pp.imdb_rating,
+    pp.predicted_success_score,
+    pp.predicted_viewers,
+    pp.actual_viewers,
+    pp.actual_completion_rate,
+    pp.performance_category,
+    -- Prediction confidence
+    CASE 
+        WHEN pp.genre IN (SELECT genre FROM model_accuracy WHERE genre_mape < 20) THEN 'High Confidence'
+        WHEN pp.genre IN (SELECT genre FROM model_accuracy WHERE genre_mape BETWEEN 20 AND 40) THEN 'Medium Confidence'
+        ELSE 'Low Confidence'
+    END as prediction_confidence,
+    -- Acquisition recommendation
+    CASE 
+        WHEN pp.predicted_success_score > 0.7 AND pp.predicted_viewers > 5000 THEN 'Strong Acquire'
+        WHEN pp.predicted_success_score > 0.5 AND pp.predicted_viewers > 2000 THEN 'Consider Acquire'
+        WHEN pp.predicted_success_score < 0.3 OR pp.predicted_viewers < 500 THEN 'Reject'
+        ELSE 'Further Analysis Needed'
+    END as acquisition_recommendation
+FROM performance_prediction pp
+WHERE pp.actual_viewers IS NOT NULL
+ORDER BY pp.predicted_success_score DESC;

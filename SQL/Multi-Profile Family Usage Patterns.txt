@@ -1,0 +1,131 @@
+# Analyze how families use multiple profiles, content sharing, and individual viewing patterns within shared accounts.
+
+WITH family_accounts AS (
+    SELECT 
+        u.user_id as family_account_id,
+        u.subscription_type,
+        u.country,
+        COUNT(DISTINCT up.profile_id) as total_profiles,
+        SUM(CASE WHEN up.is_kid_profile = TRUE THEN 1 ELSE 0 END) as kid_profiles,
+        -- Account tenure
+        DATEDIFF(CURRENT_DATE, u.signup_date) as account_age_days
+    FROM users u
+    JOIN user_profiles up ON u.user_id = up.user_id
+    WHERE u.subscription_type = 'family'
+    GROUP BY u.user_id, u.subscription_type, u.country, u.signup_date
+    HAVING COUNT(DISTINCT up.profile_id) >= 2
+),
+profile_usage_metrics AS (
+    SELECT 
+        fa.family_account_id,
+        up.profile_id,
+        up.profile_name,
+        up.is_kid_profile,
+        -- Individual profile metrics
+        COUNT(DISTINCT vh.content_id) as profile_content_watched,
+        COUNT(vh.view_id) as profile_total_views,
+        AVG(vh.completion_percentage) as profile_completion_rate,
+        -- Content type preferences
+        COUNT(DISTINCT CASE WHEN c.content_type = 'movie' THEN c.content_id END) as movies_watched,
+        COUNT(DISTINCT CASE WHEN c.content_type = 'tv_show' THEN c.content_id END) as tv_shows_watched,
+        -- Time patterns
+        AVG(CASE WHEN HOUR(vh.start_time) BETWEEN 16 AND 22 THEN 1 ELSE 0 END) as prime_time_ratio,
+        AVG(CASE WHEN HOUR(vh.start_time) BETWEEN 22 AND 6 THEN 1 ELSE 0 END) as late_night_ratio,
+        -- Device usage
+        COUNT(DISTINCT vh.device_type) as devices_used
+    FROM family_accounts fa
+    JOIN user_profiles up ON fa.family_account_id = up.user_id
+    LEFT JOIN viewing_history vh ON up.profile_id = vh.profile_id
+    LEFT JOIN content c ON vh.content_id = c.content_id
+    WHERE vh.start_time >= DATE_SUB(CURRENT_DATE, INTERVAL 90 DAY)
+    GROUP BY fa.family_account_id, up.profile_id, up.profile_name, up.is_kid_profile
+),
+family_content_overlap AS (
+    SELECT 
+        fa.family_account_id,
+        -- Content sharing metrics
+        COUNT(DISTINCT vh.content_id) as family_total_content,
+        COUNT(DISTINCT CASE WHEN shared.content_count > 1 THEN shared.content_id END) as shared_content,
+        -- Profile interaction patterns
+        COUNT(DISTINCT up.profile_id) as active_profiles,
+        -- Genre diversity
+        COUNT(DISTINCT c.genre) as genres_watched,
+        -- Family viewing sessions (same content, same day)
+        COUNT(DISTINCT CASE WHEN same_day.view_count > 1 THEN same_day.content_id END) as same_day_family_views
+    FROM family_accounts fa
+    JOIN user_profiles up ON fa.family_account_id = up.user_id
+    JOIN viewing_history vh ON up.profile_id = vh.profile_id
+    JOIN content c ON vh.content_id = c.content_id
+    LEFT JOIN (
+        SELECT content_id, DATE(start_time) as view_date, family_account_id,
+               COUNT(DISTINCT profile_id) as profile_count
+        FROM viewing_history vh2
+        JOIN user_profiles up2 ON vh2.profile_id = up2.profile_id
+        GROUP BY content_id, DATE(start_time), family_account_id
+        HAVING COUNT(DISTINCT profile_id) > 1
+    ) same_day ON vh.content_id = same_day.content_id AND up.user_id = same_day.family_account_id
+    LEFT JOIN (
+        SELECT content_id, family_account_id, COUNT(DISTINCT profile_id) as content_count
+        FROM viewing_history vh3
+        JOIN user_profiles up3 ON vh3.profile_id = up3.profile_id
+        GROUP BY content_id, family_account_id
+    ) shared ON vh.content_id = shared.content_id AND up.user_id = shared.family_account_id
+    WHERE vh.start_time >= DATE_SUB(CURRENT_DATE, INTERVAL 90 DAY)
+    GROUP BY fa.family_account_id
+),
+family_engagement_analysis AS (
+    SELECT 
+        fa.*,
+        fco.family_total_content,
+        fco.shared_content,
+        fco.active_profiles,
+        fco.genres_watched,
+        fco.same_day_family_views,
+        -- Family engagement score
+        (fco.active_profiles / fa.total_profiles * 0.3 +
+         fco.shared_content / GREATEST(fco.family_total_content, 1) * 0.4 +
+         fco.same_day_family_views / GREATEST(fco.family_total_content, 1) * 0.3) as family_engagement_score,
+        -- Profile usage distribution
+        (SELECT STDDEV(pum.profile_total_views)
+         FROM profile_usage_metrics pum
+         WHERE pum.family_account_id = fa.family_account_id
+        ) as usage_inequality
+    FROM family_accounts fa
+    JOIN family_content_overlap fco ON fa.family_account_id = fco.family_account_id
+)
+SELECT 
+    fea.family_account_id,
+    fea.subscription_type,
+    fea.country,
+    fea.total_profiles,
+    fea.kid_profiles,
+    fea.family_engagement_score,
+    fea.usage_inequality,
+    fea.shared_content,
+    fea.same_day_family_views,
+    -- Family type classification
+    CASE 
+        WHEN fea.family_engagement_score > 0.7 AND fea.usage_inequality < 50 THEN 'Highly Engaged Family'
+        WHEN fea.family_engagement_score > 0.5 AND fea.kid_profiles > 0 THEN 'Family with Kids'
+        WHEN fea.usage_inequality > 100 THEN 'Dominant User Account'
+        WHEN fea.family_engagement_score < 0.3 THEN 'Low Engagement Family'
+        ELSE 'Balanced Family Usage'
+    END as family_type,
+    -- Content recommendations
+    (SELECT GROUP_CONCAT(DISTINCT c.genre ORDER BY COUNT(vh.view_id) DESC LIMIT 3)
+     FROM viewing_history vh
+     JOIN user_profiles up ON vh.profile_id = up.profile_id
+     JOIN content c ON vh.content_id = c.content_id
+     WHERE up.user_id = fea.family_account_id
+     GROUP BY c.genre
+     ORDER BY COUNT(vh.view_id) DESC
+     LIMIT 3
+    ) as top_family_genres,
+    -- Retention risk assessment
+    CASE 
+        WHEN fea.family_engagement_score < 0.2 AND fea.account_age_days > 180 THEN 'High Churn Risk'
+        WHEN fea.family_engagement_score < 0.4 AND fea.usage_inequality > 150 THEN 'Medium Churn Risk'
+        ELSE 'Low Churn Risk'
+    END as retention_risk
+FROM family_engagement_analysis fea
+ORDER BY fea.family_engagement_score DESC;

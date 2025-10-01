@@ -1,0 +1,144 @@
+# Identify and analyze binge-watching patterns, including triggers, content characteristics, and user segments.
+
+WITH viewing_sessions AS (
+    SELECT 
+        vh.profile_id,
+        vh.content_id,
+        vh.start_time,
+        vh.end_time,
+        c.content_type,
+        c.genre,
+        c.duration_minutes,
+        -- Session grouping (binge detection)
+        LAG(vh.end_time) OVER (
+            PARTITION BY vh.profile_id, vh.content_id 
+            ORDER BY vh.start_time
+        ) as previous_end_time,
+        -- Time gap between sessions
+        CASE 
+            WHEN LAG(vh.end_time) OVER (
+                PARTITION BY vh.profile_id, vh.content_id 
+                ORDER BY vh.start_time
+            ) IS NOT NULL THEN
+                TIMESTAMPDIFF(MINUTE, 
+                    LAG(vh.end_time) OVER (
+                        PARTITION BY vh.profile_id, vh.content_id 
+                        ORDER BY vh.start_time
+                    ), 
+                    vh.start_time
+                )
+            ELSE NULL
+        END as time_gap_minutes
+    FROM viewing_history vh
+    JOIN content c ON vh.content_id = c.content_id
+    WHERE vh.start_time >= DATE_SUB(CURRENT_DATE, INTERVAL 90 DAY)
+),
+binge_episodes AS (
+    SELECT 
+        profile_id,
+        content_id,
+        content_type,
+        genre,
+        -- Binge session identification
+        MIN(start_time) as binge_start,
+        MAX(end_time) as binge_end,
+        COUNT(*) as episodes_in_binge,
+        SUM(duration_minutes) as total_binge_minutes,
+        -- Binge intensity metrics
+        AVG(time_gap_minutes) as avg_time_between_episodes,
+        MAX(time_gap_minutes) as max_time_gap,
+        -- Session characteristics
+        CASE 
+            WHEN AVG(time_gap_minutes) < 60 THEN 'High Intensity Binge'
+            WHEN AVG(time_gap_minutes) < 180 THEN 'Moderate Binge'
+            ELSE 'Casual Viewing'
+        END as binge_intensity
+    FROM viewing_sessions
+    WHERE (time_gap_minutes IS NULL OR time_gap_minutes < 240)  -- 4-hour maximum gap
+    GROUP BY profile_id, content_id, content_type, genre
+    HAVING COUNT(*) >= 3  -- Minimum 3 episodes for a binge
+),
+user_binge_behavior AS (
+    SELECT 
+        be.profile_id,
+        up.user_id,
+        u.subscription_type,
+        u.country,
+        -- Binge frequency
+        COUNT(DISTINCT be.content_id) as total_binge_sessions,
+        AVG(be.episodes_in_binge) as avg_episodes_per_binge,
+        AVG(be.total_binge_minutes) as avg_binge_duration_minutes,
+        -- Binge timing patterns
+        AVG(CASE WHEN HOUR(be.binge_start) BETWEEN 18 AND 23 THEN 1 ELSE 0 END) as evening_binge_ratio,
+        AVG(CASE WHEN DAYOFWEEK(be.binge_start) IN (1,7) THEN 1 ELSE 0 END) as weekend_binge_ratio,
+        -- Content preferences for binging
+        COUNT(DISTINCT CASE WHEN be.genre = 'Drama' THEN be.content_id END) as drama_binges,
+        COUNT(DISTINCT CASE WHEN be.genre = 'Comedy' THEN be.content_id END) as comedy_binges,
+        COUNT(DISTINCT CASE WHEN be.content_type = 'tv_show' THEN be.content_id END) as tv_show_binges
+    FROM binge_episodes be
+    JOIN user_profiles up ON be.profile_id = up.profile_id
+    JOIN users u ON up.user_id = u.user_id
+    GROUP BY be.profile_id, up.user_id, u.subscription_type, u.country
+),
+binge_content_analysis AS (
+    SELECT 
+        c.content_id,
+        c.title,
+        c.genre,
+        c.content_type,
+        -- Binge metrics per content
+        COUNT(DISTINCT be.profile_id) as total_binge_viewers,
+        AVG(be.episodes_in_binge) as avg_binge_length,
+        AVG(be.total_binge_minutes) as avg_binge_duration,
+        -- Binge completion rate
+        AVG(be.total_binge_minutes * 100.0 / (
+            SELECT SUM(te.duration_minutes)
+            FROM tv_episodes te
+            WHERE te.tv_show_id = c.content_id
+        )) as binge_completion_percentage,
+        -- Binge trigger analysis
+        (SELECT AVG(vh.completion_percentage)
+         FROM viewing_history vh
+         WHERE vh.content_id = c.content_id
+         AND vh.view_id IN (
+             SELECT MIN(view_id)
+             FROM viewing_history
+             WHERE content_id = c.content_id
+             GROUP BY profile_id
+         )
+        ) as first_episode_completion_rate
+    FROM binge_episodes be
+    JOIN content c ON be.content_id = c.content_id
+    GROUP BY c.content_id, c.title, c.genre, c.content_type
+    HAVING total_binge_viewers >= 10
+)
+SELECT 
+    bca.content_id,
+    bca.title,
+    bca.genre,
+    bca.content_type,
+    bca.total_binge_viewers,
+    bca.avg_binge_length,
+    bca.binge_completion_percentage,
+    bca.first_episode_completion_rate,
+    -- Bingeability score
+    (bca.total_binge_viewers * 0.3 +
+     bca.avg_binge_length * 0.25 +
+     bca.binge_completion_percentage * 0.25 +
+     bca.first_episode_completion_rate * 0.2) as bingeability_score,
+    -- User segment analysis
+    (SELECT COUNT(DISTINCT ubb.profile_id)
+     FROM user_binge_behavior ubb
+     JOIN binge_episodes be ON ubb.profile_id = be.profile_id
+     WHERE be.content_id = bca.content_id
+     AND ubb.total_binge_sessions > 5
+    ) as heavy_binger_viewers,
+    -- Recommendation strategy
+    CASE 
+        WHEN bingeability_score > 8 THEN 'Promote as Binge-Worthy'
+        WHEN first_episode_completion_rate > 80 THEN 'Strong First Episode - Push Series'
+        WHEN binge_completion_percentage > 70 THEN 'High Completion - Feature in Collections'
+        ELSE 'Standard Promotion'
+    END as marketing_recommendation
+FROM binge_content_analysis bca
+ORDER BY bingeability_score DESC;

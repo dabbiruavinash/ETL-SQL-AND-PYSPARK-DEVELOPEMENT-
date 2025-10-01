@@ -1,0 +1,17 @@
+# Analyze the complete user journey from signup to content consumption across different subscription tiers and countries.
+
+with user_engagement as (
+select u.user_id, u.subscription_type, u.country, count(Distinct vh.content_id) as unique_content_watched, count(vh.view_id) as total_views, avg(vh.completion_percentage) as avg_completion_rate, max(vh.start_time) as last_watch_date, count(distinct up.profile_id) as profiles_created, count(distinct wl.content_id) as watchlist_items from users u 
+left join user_profiles up on u.user_id = up.user_id
+left join viewing_history vh on up.profile_id = vh.profile_id
+left join watchlist wl on up.profile_id = wl.profile_id
+where u.signup_date >= add_months(current_date,-3) group by u.user_id, u.subscription_type, u.country),
+engagement_segements as (
+select *, case 
+when total_views = 0 then 'Inactive'
+when total_view <= 5 then 'Light User'
+when total_views <= 20 then 'Medium User'
+Else 'Heavy User' end as engagement_segement, case
+when avg_completion_rate < 50 then 'Low completion'
+when avg_completion_rate < 80 then 'Medium Completion' else 'High completion' end as completion_segment from user_engagement)
+select subscription_type, country, engagement_segment, completion_segment, count(*) as user_count, avg(unique_content_watched) as avg_unique_content, avg(total_views) as avg_total_views, avg(profiles_created) as avg_profiles from engagement_segments group by subscription_type, country, engagement_segment, completion_segment with rollup having count(*) > 10 order by subscription_type, user_count DESC;

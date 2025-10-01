@@ -1,0 +1,17 @@
+# Analyze how content performs over time across different user cohorts and identify long-term engagement patterns.
+
+with content_cohorts as (
+select c.content_id, c.title, c.genre, c.content_type, date_format(c.added_date, '%Y-%m') as content_cohort, 
+(select count(distinct vh.profile_id) from viewing_history vh where vh.content_id = c.content_id and vh.start_time between c.added_date and date_add(c.added_date, interval 30 day)) as intital_viewers,
+(select avg(vh.completion_percentage) from viewing_history vh where vh.content_id = c.content_id and vh.start_time between c.added_date and date_add(c.added_date, interval 30 day)) as initial_completion_rate from content c where c.added_date >= '2023-01-01'),
+
+long_term_metrics as (
+select cc.*, 
+(select count(distinct vh.profile_id) from viewing vh where vh.content_id = cc.content_id and vh.start_time between date_add(cc.added_date, interval 31 day) and date_add(cc.added_date, interval 90 day)) as long_term_viewers, case
+when cc.initial_viewers > 0 then
+(select count(distinct vh.profile_id) from viewing_history vh where vh.content_id = cc.content_id and vh.start_time between date_add(cc.added_date, interval 31 day) and date_add(cc.added_date, interval 90 day) and vh.profile_id in (
+select distinct vh2.profile_id from viewing _history vh2 where vh2.content_id = cc.content_id and vh2.start_time between cc.added_date and date_add(cc.added_date, interval 30 day)))/cc.initial_viewers * 100 else 0 end as viewer_retention_rate from content_cohorts cc)
+select content_cohort, genre, content_type, count(*) as content_count, avg(initial_viewers) as avg_initital_viewers, avg(long_term_viewers) as avg_long_term_viewers, avg(viewer_retention_rate) as avg_retention_rate, avg(intital_completion_rate) as avg_initial_completion,
+sum(case when viewer_retention_rate > 50 then 1 else 0 end) as high_retention_content,
+sum(case when viewer_retention_rate between 20 and 50 then 1 else 0 end) as medium_rentention_content, 
+sum(case when viewer_retention_rate < 20 then 1 else 0 end) as low_retention_content from long_term_metrics group by content_cohort , genre, content_type having count(*) >= 5 order by content_cohort, avg_retention_rate desc;

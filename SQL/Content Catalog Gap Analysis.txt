@@ -1,0 +1,156 @@
+# Identify gaps in the content catalog compared to user demand and competitor offerings.
+
+WITH user_demand_analysis AS (
+    SELECT 
+        c.genre,
+        c.content_type,
+        c.maturity_rating,
+        -- Current viewership metrics
+        COUNT(DISTINCT vh.profile_id) as current_viewers,
+        COUNT(vh.view_id) as current_views,
+        AVG(vh.completion_percentage) as current_completion_rate,
+        -- Demand growth
+        (COUNT(CASE WHEN vh.start_time >= DATE_SUB(CURRENT_DATE, INTERVAL 30 DAY) THEN 1 END) - 
+         COUNT(CASE WHEN vh.start_time BETWEEN DATE_SUB(CURRENT_DATE, INTERVAL 60 DAY) 
+                                     AND DATE_SUB(CURRENT_DATE, INTERVAL 30 DAY) THEN 1 END)) * 100.0 /
+         GREATEST(COUNT(CASE WHEN vh.start_time BETWEEN DATE_SUB(CURRENT_DATE, INTERVAL 60 DAY) 
+                                             AND DATE_SUB(CURRENT_DATE, INTERVAL 30 DAY) THEN 1 END), 1) as demand_growth_pct,
+        -- Unmet demand (watchlist indicators)
+        COUNT(DISTINCT wl.content_id) as watchlist_demand
+    FROM content c
+    LEFT JOIN viewing_history vh ON c.content_id = vh.content_id
+    LEFT JOIN watchlist wl ON c.content_id = wl.content_id
+    WHERE vh.start_time >= DATE_SUB(CURRENT_DATE, INTERVAL 90 DAY)
+       OR wl.added_date >= DATE_SUB(CURRENT_DATE, INTERVAL 90 DAY)
+    GROUP BY c.genre, c.content_type, c.maturity_rating
+),
+catalog_coverage AS (
+    SELECT 
+        ud.genre,
+        ud.content_type,
+        ud.maturity_rating,
+        ud.current_viewers,
+        ud.current_views,
+        ud.demand_growth_pct,
+        ud.watchlist_demand,
+        -- Catalog size metrics
+        COUNT(DISTINCT c.content_id) as current_catalog_size,
+        AVG(c.imdb_rating) as avg_imdb_rating,
+        -- Content freshness
+        AVG(YEAR(CURRENT_DATE) - c.release_year) as avg_content_age,
+        -- Coverage ratio (current vs potential)
+        ud.current_views * 100.0 / (
+            SELECT MAX(current_views) 
+            FROM user_demand_analysis 
+            WHERE genre = ud.genre
+        ) as market_coverage_ratio
+    FROM user_demand_analysis ud
+    LEFT JOIN content c ON ud.genre = c.genre 
+                       AND ud.content_type = c.content_type 
+                       AND ud.maturity_rating = c.maturity_rating
+    GROUP BY ud.genre, ud.content_type, ud.maturity_rating, ud.current_viewers, 
+             ud.current_views, ud.demand_growth_pct, ud.watchlist_demand
+),
+competitor_analysis AS (
+    -- Hypothetical competitor data (in real scenario, this would come from market research)
+    SELECT 
+        genre,
+        content_type,
+        COUNT(*) as competitor_titles,
+        AVG(imdb_rating) as competitor_avg_rating,
+        AVG(release_year) as competitor_avg_release_year
+    FROM (
+        VALUES 
+        ('Action', 'movie', 150, 6.8, 2018),
+        ('Drama', 'movie', 200, 7.2, 2017),
+        ('Comedy', 'movie', 180, 6.5, 2019),
+        ('Action', 'tv_show', 45, 7.5, 2020),
+        ('Drama', 'tv_show', 75, 7.8, 2019)
+    ) AS comp_data(genre, content_type, competitor_titles, competitor_avg_rating, competitor_avg_release_year)
+    GROUP BY genre, content_type
+),
+gap_analysis AS (
+    SELECT 
+        cc.genre,
+        cc.content_type,
+        cc.maturity_rating,
+        cc.current_catalog_size,
+        cc.avg_imdb_rating,
+        cc.avg_content_age,
+        cc.market_coverage_ratio,
+        cc.demand_growth_pct,
+        cc.watchlist_demand,
+        -- Competitor comparison
+        ca.competitor_titles,
+        ca.competitor_avg_rating,
+        ca.competitor_avg_release_year,
+        -- Gap calculations
+        (ca.competitor_titles - cc.current_catalog_size) as title_gap,
+        (ca.competitor_avg_rating - cc.avg_imdb_rating) as quality_gap,
+        (ca.competitor_avg_release_year - (YEAR(CURRENT_DATE) - cc.avg_content_age)) as freshness_gap,
+        -- Strategic priority score
+        (cc.demand_growth_pct * 0.3 +
+         cc.watchlist_demand * 0.0001 * 0.2 +
+         ABS(ca.competitor_titles - cc.current_catalog_size) * 0.2 +
+         (ca.competitor_avg_rating - cc.avg_imdb_rating) * 0.3) as acquisition_priority_score
+    FROM catalog_coverage cc
+    LEFT JOIN competitor_analysis ca ON cc.genre = ca.genre AND cc.content_type = ca.content_type
+    WHERE cc.current_viewers >= 1000
+),
+acquisition_recommendations AS (
+    SELECT 
+        ga.*,
+        -- Gap classification
+        CASE 
+            WHEN ga.acquisition_priority_score > 8 THEN 'Critical Gap'
+            WHEN ga.acquisition_priority_score > 6 THEN 'High Priority'
+            WHEN ga.acquisition_priority_score > 4 THEN 'Medium Priority'
+            ELSE 'Low Priority'
+        END as gap_priority,
+        -- Recommended action
+        CASE 
+            WHEN ga.title_gap > 20 AND ga.quality_gap > 0.5 THEN 'Major Content Acquisition'
+            WHEN ga.freshness_gap > 2 THEN 'Focus on New Releases'
+            WHEN ga.quality_gap > 0.5 THEN 'Quality Content Acquisition'
+            WHEN ga.title_gap > 10 THEN 'Expand Catalog Volume'
+            ELSE 'Maintain Current Strategy'
+        END as recommended_action,
+        -- Budget allocation suggestion
+        CASE 
+            WHEN ga.acquisition_priority_score > 8 THEN 'Allocate 20% of Budget'
+            WHEN ga.acquisition_priority_score > 6 THEN 'Allocate 15% of Budget'
+            WHEN ga.acquisition_priority_score > 4 THEN 'Allocate 10% of Budget'
+            ELSE 'Allocate 5% of Budget'
+        END as budget_allocation
+    FROM gap_analysis ga
+)
+SELECT 
+    genre,
+    content_type,
+    maturity_rating,
+    current_catalog_size,
+    competitor_titles,
+    title_gap,
+    quality_gap,
+    freshness_gap,
+    acquisition_priority_score,
+    gap_priority,
+    recommended_action,
+    budget_allocation,
+    -- Specific content recommendations
+    (SELECT GROUP_CONCAT(
+        CONCAT(a.actor_name, ' (', COUNT(DISTINCT ca.content_id), ' titles)') 
+        ORDER BY COUNT(DISTINCT ca.content_id) DESC 
+        LIMIT 3
+     )
+     FROM content_actors ca
+     JOIN actors a ON ca.actor_id = a.actor_id
+     JOIN content c ON ca.content_id = c.content_id
+     WHERE c.genre = ar.genre 
+     AND c.content_type = ar.content_type
+     AND c.imdb_rating > 7.0
+     GROUP BY a.actor_name
+     HAVING COUNT(DISTINCT ca.content_id) >= 3
+    ) as top_actors_to_target
+FROM acquisition_recommendations ar
+ORDER BY acquisition_priority_score DESC, gap_priority DESC;

@@ -1,0 +1,111 @@
+# Analyze how content spreads through user networks and identify factors driving viral content.
+
+WITH user_network AS (
+    -- Hypothetical social connections (in real scenario, this would come from social features)
+    SELECT 
+        u1.user_id as user_id,
+        u2.user_id as connected_user_id,
+        -- Connection strength based on shared behaviors
+        (COUNT(DISTINCT CASE WHEN vh1.content_id = vh2.content_id THEN vh1.content_id END) * 0.5 +
+         COUNT(DISTINCT CASE WHEN c1.genre = c2.genre THEN c1.genre END) * 0.3 +
+         CASE WHEN u1.country = u2.country THEN 0.2 ELSE 0 END) as connection_strength
+    FROM users u1
+    JOIN users u2 ON u1.user_id != u2.user_id
+    LEFT JOIN user_profiles up1 ON u1.user_id = up1.user_id
+    LEFT JOIN user_profiles up2 ON u2.user_id = up2.user_id
+    LEFT JOIN viewing_history vh1 ON up1.profile_id = vh1.profile_id
+    LEFT JOIN viewing_history vh2 ON up2.profile_id = vh2.profile_id
+    LEFT JOIN content c1 ON vh1.content_id = c1.content_id
+    LEFT JOIN content c2 ON vh2.content_id = c2.content_id
+    WHERE u1.signup_date >= DATE_SUB(CURRENT_DATE, INTERVAL 365 DAY)
+    AND u2.signup_date >= DATE_SUB(CURRENT_DATE, INTERVAL 365 DAY)
+    GROUP BY u1.user_id, u2.user_id, u1.country, u2.country
+    HAVING connection_strength > 0.3
+    AND COUNT(DISTINCT CASE WHEN vh1.content_id = vh2.content_id THEN vh1.content_id END) >= 2
+),
+content_adoption_curve AS (
+    SELECT 
+        c.content_id,
+        c.title,
+        c.genre,
+        c.content_type,
+        -- Adoption metrics
+        COUNT(DISTINCT vh.profile_id) as total_viewers,
+        COUNT(DISTINCT DATE(vh.start_time)) as adoption_days,
+        MIN(vh.start_time) as first_view,
+        MAX(vh.start_time) as last_view,
+        -- Network spread metrics
+        COUNT(DISTINCT un.connected_user_id) as network_reach,
+        AVG(un.connection_strength) as avg_connection_strength,
+        -- Virality coefficient
+        (COUNT(DISTINCT un.connected_user_id) / GREATEST(COUNT(DISTINCT vh.profile_id), 1)) as virality_coefficient
+    FROM content c
+    JOIN viewing_history vh ON c.content_id = vh.content_id
+    JOIN user_profiles up ON vh.profile_id = up.profile_id
+    LEFT JOIN user_network un ON up.user_id = un.user_id
+    WHERE vh.start_time >= DATE_SUB(CURRENT_DATE, INTERVAL 90 DAY)
+    GROUP BY c.content_id, c.title, c.genre, c.content_type
+    HAVING total_viewers >= 10
+),
+network_analysis AS (
+    SELECT 
+        cac.*,
+        -- Early adopters vs mainstream
+        (SELECT COUNT(DISTINCT vh.profile_id)
+         FROM viewing_history vh
+         WHERE vh.content_id = cac.content_id
+         AND vh.start_time <= DATE_ADD(cac.first_view, INTERVAL 7 DAY)
+        ) as early_adopters,
+        -- Network density
+        (SELECT COUNT(*)
+         FROM user_network un
+         WHERE un.user_id IN (
+             SELECT DISTINCT up.user_id
+             FROM viewing_history vh
+             JOIN user_profiles up ON vh.profile_id = up.profile_id
+             WHERE vh.content_id = cac.content_id
+         )
+        ) as total_connections,
+        -- Content quality signals
+        (SELECT AVG(ur.rating)
+         FROM user_ratings ur
+         WHERE ur.content_id = cac.content_id
+        ) as avg_rating,
+        (SELECT AVG(vh.completion_percentage)
+         FROM viewing_history vh
+         WHERE vh.content_id = cac.content_id
+        ) as avg_completion
+    FROM content_adoption_curve cac
+)
+SELECT 
+    content_id,
+    title,
+    genre,
+    content_type,
+    total_viewers,
+    early_adopters,
+    network_reach,
+    virality_coefficient,
+    avg_rating,
+    avg_completion,
+    -- Virality classification
+    CASE 
+        WHEN virality_coefficient > 2.0 THEN 'Highly Viral'
+        WHEN virality_coefficient > 1.0 THEN 'Viral'
+        WHEN virality_coefficient > 0.5 THEN 'Moderate Spread'
+        ELSE 'Limited Spread'
+    END as virality_category,
+    -- Success prediction
+    (virality_coefficient * 0.3 +
+     (early_adopters / GREATEST(total_viewers, 1)) * 0.2 +
+     COALESCE(avg_rating, 0) / 5 * 0.3 +
+     avg_completion / 100 * 0.2) as success_score,
+    -- Network recommendations
+    (SELECT GROUP_CONCAT(DISTINCT a.actor_name ORDER BY ca.actor_id LIMIT 3)
+     FROM content_actors ca
+     JOIN actors a ON ca.actor_id = a.actor_id
+     WHERE ca.content_id = na.content_id
+    ) as top_actors
+FROM network_analysis na
+WHERE total_viewers >= 50
+ORDER BY virality_coefficient DESC, success_score DESC;

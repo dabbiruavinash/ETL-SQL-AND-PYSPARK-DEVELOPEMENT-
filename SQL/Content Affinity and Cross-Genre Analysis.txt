@@ -1,0 +1,93 @@
+# Identify content genre relationships and user cross-genre preferences to optimize recommendations and content acquisition.
+
+WITH user_genre_affinity AS (
+    SELECT 
+        up.profile_id,
+        c.genre,
+        COUNT(DISTINCT vh.content_id) as genre_view_count,
+        SUM(vh.completion_percentage) as total_completion,
+        AVG(vh.completion_percentage) as avg_completion,
+        COUNT(DISTINCT DATE(vh.start_time)) as active_days,
+        -- Calculate genre affinity score
+        (COUNT(DISTINCT vh.content_id) * 0.4 + 
+         AVG(vh.completion_percentage) * 0.3 + 
+         COUNT(DISTINCT DATE(vh.start_time)) * 0.3) as genre_affinity_score
+    FROM viewing_history vh
+    JOIN user_profiles up ON vh.profile_id = up.profile_id
+    JOIN content c ON vh.content_id = c.content_id
+    WHERE vh.start_time >= DATE_SUB(CURRENT_DATE, INTERVAL 90 DAY)
+    GROUP BY up.profile_id, c.genre
+    HAVING genre_view_count >= 3
+),
+genre_combinations AS (
+    SELECT 
+        uga1.profile_id,
+        uga1.genre as primary_genre,
+        uga2.genre as secondary_genre,
+        uga1.genre_affinity_score as primary_score,
+        uga2.genre_affinity_score as secondary_score,
+        -- Calculate cross-genre compatibility
+        (uga1.genre_affinity_score * uga2.genre_affinity_score) as compatibility_score,
+        -- Same viewing session analysis
+        (SELECT COUNT(DISTINCT DATE(vh1.start_time))
+         FROM viewing_history vh1
+         JOIN content c1 ON vh1.content_id = c1.content_id
+         WHERE vh1.profile_id = uga1.profile_id 
+         AND c1.genre = uga1.genre
+         AND DATE(vh1.start_time) IN (
+             SELECT DISTINCT DATE(vh2.start_time)
+             FROM viewing_history vh2
+             JOIN content c2 ON vh2.content_id = c2.content_id
+             WHERE vh2.profile_id = uga1.profile_id 
+             AND c2.genre = uga2.genre
+         )
+        ) as co_viewing_days
+    FROM user_genre_affinity uga1
+    JOIN user_genre_affinity uga2 ON uga1.profile_id = uga2.profile_id
+    WHERE uga1.genre != uga2.genre
+    AND uga1.genre_affinity_score >= 0.6
+    AND uga2.genre_affinity_score >= 0.4
+),
+genre_network AS (
+    SELECT 
+        primary_genre,
+        secondary_genre,
+        COUNT(DISTINCT profile_id) as user_count,
+        AVG(compatibility_score) as avg_compatibility,
+        AVG(co_viewing_days) as avg_co_viewing_days,
+        -- Strength of relationship
+        (COUNT(DISTINCT profile_id) * 0.5 + 
+         AVG(compatibility_score) * 0.3 + 
+         AVG(co_viewing_days) * 0.2) as relationship_strength
+    FROM genre_combinations
+    GROUP BY primary_genre, secondary_genre
+    HAVING COUNT(DISTINCT profile_id) >= 10
+)
+SELECT 
+    gn.primary_genre,
+    gn.secondary_genre,
+    gn.user_count,
+    gn.avg_compatibility,
+    gn.avg_co_viewing_days,
+    gn.relationship_strength,
+    -- Content gap analysis
+    (SELECT COUNT(*) 
+     FROM content c 
+     WHERE c.genre = gn.secondary_genre
+     AND c.content_id NOT IN (
+         SELECT DISTINCT ca.content_id
+         FROM content_actors ca
+         JOIN content c_primary ON ca.content_id = c_primary.content_id
+         WHERE c_primary.genre = gn.primary_genre
+     )
+    ) as potential_cross_genre_content,
+    -- Recommendation opportunity score
+    (gn.relationship_strength * 
+     (SELECT COUNT(DISTINCT up.profile_id)
+      FROM user_profiles up
+      JOIN user_genre_affinity uga ON up.profile_id = uga.profile_id
+      WHERE uga.genre = gn.primary_genre
+      AND uga.genre_affinity_score >= 0.6
+     ) * 0.0001) as opportunity_score
+FROM genre_network gn
+ORDER BY relationship_strength DESC, opportunity_score DESC;
